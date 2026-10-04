@@ -1,0 +1,202 @@
+// Esquema de datos del motor "Reenviador" de LUXE FAN MANAGEMENT
+// Diseño propio (no copiado de ningún producto de terceros): cubre el mismo
+// conjunto de funcionalidad de negocio (multi-cuenta, multi-campaña, modo
+// aleatorio + horarios fijos, control anti-baneo) descrito por el usuario.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum SendMode {
+  COPY_AS_OWN      // "copiar como propio"
+  FORWARD_NO_AUTHOR // "reenvio sin autor" (conserva emoji premium)
+}
+
+enum ScheduleMode {
+  RANDOM // ciclo con pausas aleatorias + descansos por lote
+  FIXED  // tabla de horarios exactos por posicion
+}
+
+enum CampaignStatus {
+  ACTIVE
+  PAUSED
+}
+
+enum AccountHealth {
+  OK
+  PEER_FLOOD_PAUSED
+  DISABLED
+}
+
+enum LogLevel {
+  INFO
+  SENT
+  ERROR
+  WAIT
+  MISSED // "Horario perdido": un slot de horario fijo se paso sin enviar
+}
+
+model Account {
+  id            String   @id @default(cuid())
+  label         String   // nombre visible, ej "Zoweey"
+  phoneNumber   String   @unique
+  sessionString String   // sesion MTProto cifrada en reposo (ver ENCRYPTION.md)
+  timezone      String   @default("Europe/Madrid")
+
+  // Interruptor maestro: "Encender/Apagar reenviador" de la cuenta.
+  // Con esto en false, NINGUNA campaña de esta cuenta envia nada,
+  // independientemente de su propio estado Activa/Pausada.
+  reenviadorEnabled Boolean @default(false)
+
+  health            AccountHealth @default(OK)
+  peerFloodUntil    DateTime?     // fin de la pausa por PeerFlood
+  softStartCyclesLeft Int         @default(0) // ciclos restantes en arranque suave
+  softStartMultiplier Float       @default(2)
+
+  // Config global de proteccion anti-baneo para esta cuenta (aplica a
+  // todas sus campañas, igual que "PeerFlood" en el panel de configuracion)
+  peerFloodPauseMinutes   Int   @default(45)
+  softStartCycles         Int   @default(2)   // ciclos de arranque suave tras la pausa
+  firstCycleSendCap       Int   @default(10)  // tope de envios en el primer ciclo tras pausa
+  firstCycleLinkFraction  Float @default(0.3) // fraccion de envios con enlace permitidos en el primer ciclo
+
+  // Cuanto puede retrasarse el envio de un horario fijo (por estar apagado,
+  // pausado por PeerFlood, o el CRM reiniciandose) antes de darlo por
+  // perdido en vez de mandarlo tarde. Igual al "tope" que viste en consola.
+  missedSlotToleranceMinutes Int @default(60)
+
+  // Numero de WhatsApp (E.164, ej +34600111222) al que avisar de pausas
+  // por PeerFlood y otros eventos importantes. El envio real se hace via
+  // Twilio (ver notifications.ts) con las credenciales globales del .env.
+  notifyWhatsAppTo String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  sourceGroups SourceGroup[]
+  campaigns    Campaign[]
+  logs         SendLog[]
+}
+
+model SourceGroup {
+  id          String  @id @default(cuid())
+  accountId   String
+  account     Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  title       String  // titulo exacto del chat/grupo origen en Telegram
+  topicName   String? // nombre del tema/topic dentro del grupo, si aplica
+  chatId      String  // id numerico de Telegram del chat origen
+  topicId     Int?    // id del topic (foro) si aplica
+  recentLimit Int     @default(25) // cuantos mensajes recientes se consideran
+
+  campaigns Campaign[]
+
+  @@unique([accountId, chatId, topicId])
+}
+
+model Campaign {
+  id       String         @id @default(cuid())
+  accountId String
+  account   Account        @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  sourceGroupId String
+  sourceGroup   SourceGroup @relation(fields: [sourceGroupId], references: [id])
+
+  folderName String   // nombre de la carpeta de Telegram (agrupa los chats destino)
+  status     CampaignStatus @default(ACTIVE)
+
+  sendMode      SendMode @default(FORWARD_NO_AUTHOR)
+  sendAlbums    Boolean  @default(true)
+  textOnlyAllowed Boolean @default(false)
+
+  scheduleMode ScheduleMode @default(RANDOM)
+
+  // --- parametros modo RANDOM ---
+  cycleSeconds        Int   @default(2700) // 45 min por defecto
+  minGapSeconds        Int   @default(2)
+  maxGapSeconds         Int   @default(7)
+  batchSize             Int   @default(60)
+  batchRestMinSeconds   Int   @default(30)
+  batchRestMaxSeconds   Int   @default(60)
+  activeFrom            String @default("00:00") // HH:mm en timezone de la cuenta
+  activeTo              String @default("23:59")
+
+  // anti-duplicado: no repetir destino hasta que haya N mensajes ajenos de por medio
+  minForeignMessagesBeforeRepeat Int @default(0)
+
+  destinationChats CampaignDestination[]
+  scheduleSlots    ScheduleSlot[]
+  logs             SendLog[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model CampaignDestination {
+  id          String   @id @default(cuid())
+  campaignId  String
+  campaign    Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  chatId      String   // id de Telegram del grupo/canal destino
+  chatTitle   String
+  topicId     Int?     // si el destino es un foro con temas
+
+  @@unique([campaignId, chatId, topicId])
+}
+
+// Solo se usa cuando Campaign.scheduleMode == FIXED
+model ScheduleSlot {
+  id         String   @id @default(cuid())
+  campaignId String
+  campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  timeOfDay  String   // "HH:mm" en timezone de la cuenta
+  position   Int      // posicion entre los mensajes recientes del origen (1 = mas nuevo)
+  active     Boolean  @default(true)
+
+  runs ScheduleSlotRun[]
+
+  @@unique([campaignId, timeOfDay])
+}
+
+/**
+ * Un registro por slot y por dia (fecha en la timezone de la cuenta): evita
+ * que el mismo horario se procese dos veces y es lo que permite distinguir
+ * "ya enviado hoy" de "hoy tocaba y no se ha enviado todavia".
+ */
+model ScheduleSlotRun {
+  id             String       @id @default(cuid())
+  scheduleSlotId String
+  scheduleSlot   ScheduleSlot @relation(fields: [scheduleSlotId], references: [id], onDelete: Cascade)
+
+  runDate String // "YYYY-MM-DD" en timezone de la cuenta
+  status  String // "SENT" | "MISSED"
+
+  createdAt DateTime @default(now())
+
+  @@unique([scheduleSlotId, runDate])
+}
+
+model SendLog {
+  id         String   @id @default(cuid())
+  accountId  String
+  account    Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  campaignId String?
+  campaign   Campaign? @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+
+  level      LogLevel
+  chatTitle  String?
+  message    String   // texto descriptivo, ej "Chat: XHUB ESPAÑOLAS | mensaje origen 860"
+  errorCode  String?
+
+  createdAt  DateTime @default(now())
+
+  @@index([accountId, createdAt])
+  @@index([campaignId, createdAt])
+}
