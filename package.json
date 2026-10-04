@@ -18,11 +18,11 @@
     "dotenv": "^16.4.5",
     "fastify": "^4.28.1",
     "input": "^1.0.1",
-    "telegram": "^2.26.16"
+    "telegram": "^2.26.16",
+    "prisma": "^5.20.0"
   },
   "devDependencies": {
     "@types/node": "^20.16.5",
-    "prisma": "^5.20.0",
     "ts-node-dev": "^2.0.0",
     "typescript": "^5.6.2"
   }
