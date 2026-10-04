@@ -1,4 +1,4 @@
-// Esquema de datos del motor "Reenviador" de LUXE FAN MANAGEMENT
+// Esquema de datos del motor "Reenviador" de LUREQO CRM
 // Diseño propio (no copiado de ningún producto de terceros): cubre el mismo
 // conjunto de funcionalidad de negocio (multi-cuenta, multi-campaña, modo
 // aleatorio + horarios fijos, control anti-baneo) descrito por el usuario.
@@ -63,7 +63,7 @@ enum StoryPrivacy {
 }
 
 // ---------- Multi-agencia ----------
-// Una Agencia = un cliente de LUXEFAN con su propio panel privado dentro del
+// Una Agencia = un cliente de LUREQO con su propio panel privado dentro del
 // MISMO despliegue de Railway: todo lo que cuelgue de agencyId (cuentas de
 // Telegram, equipo...) queda aislado del resto. El súper-admin (login con
 // PANEL_USERNAME/PANEL_PASSWORD de Railway, el mismo candado de siempre)
@@ -71,7 +71,7 @@ enum StoryPrivacy {
 // ni datos de ninguna - solo alta/baja, ver requireSuperAdmin en auth.ts.
 //
 // La agencia "legacy-agency" (id FIJO, sembrada sola al arrancar si no
-// existe - ver utils/agencyMigration.ts) es la propia LUXE FAN MANAGEMENT:
+// existe - ver utils/agencyMigration.ts) es la propia LUREQO CRM:
 // todo lo que ya existía en el CRM antes de esta funcionalidad se queda ahí
 // automáticamente (agencyId por defecto), sin perder ni mezclar nada. Esa
 // agencia en concreto se sigue gestionando con las credenciales de entorno

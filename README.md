@@ -1,4 +1,4 @@
-# LUXE FAN MANAGEMENT — Motor "Reenviador"
+# LUREQO CRM — Motor "Reenviador"
 
 Backend del motor de reenvío/publicación automática para Telegram: multi-cuenta,
 multi-campaña (carpetas de destino), modo Aleatorio y modo Horarios fijos,

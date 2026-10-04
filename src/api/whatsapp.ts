@@ -133,7 +133,7 @@ export async function registerWhatsAppRoutes(app: FastifyInstance) {
       return reply.code(409).send({ error: "El WhatsApp no está conectado todavía." });
     }
     const settings = await getSettings();
-    const text = "✅ Mensaje de prueba desde LUXE FAN MANAGEMENT.";
+    const text = "✅ Mensaje de prueba desde LUREQO CRM.";
     try {
       if (body.target === "payment") {
         const lines = (settings.paymentDestinations || "").split("\n").map((l) => l.trim()).filter(Boolean);

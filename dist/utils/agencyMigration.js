@@ -5,7 +5,7 @@ exports.ensureLegacyAgency = ensureLegacyAgency;
 const prisma_1 = require("./prisma");
 const auth_1 = require("./auth");
 /**
- * Multi-agencia: la agencia "legacy-agency" es la propia LUXE FAN MANAGEMENT
+ * Multi-agencia: la agencia "legacy-agency" es la propia LUREQO CRM
  * (todo lo que ya existía en el CRM antes de esta funcionalidad). Su id es
  * FIJO a propósito (no cuid()) porque Account.agencyId / Worker.agencyId ya
  * tienen ese mismo valor como @default en el esquema (ver schema.prisma) -
@@ -37,7 +37,7 @@ async function ensureLegacyAgency() {
     await prisma_1.prisma.agency.create({
         data: {
             id: exports.LEGACY_AGENCY_ID,
-            name: process.env.PANEL_USERNAME || "LUXE FAN MANAGEMENT",
+            name: process.env.PANEL_USERNAME || "LUREQO CRM",
             ownerEmail: `${exports.LEGACY_AGENCY_ID}@no-login.local`,
             ownerPasswordHash: randomJunkPassword,
             active: true,

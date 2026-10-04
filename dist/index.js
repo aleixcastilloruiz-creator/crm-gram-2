@@ -512,7 +512,7 @@ async function main() {
             // normal) tampoco puede seguir usando ninguna ruta desde un navegador
             // normal a partir de aquí.
             if (!worker.canUseBrowser && !(0, auth_2.isDesktopAppRequest)(request)) {
-                reply.code(403).send({ error: "Esta cuenta solo puede entrar desde la aplicación de escritorio de LUXE FAN MANAGEMENT." });
+                reply.code(403).send({ error: "Esta cuenta solo puede entrar desde la aplicación de escritorio de LUREQO CRM." });
                 return;
             }
             // "Solo lectura" (Equipo → Permisos, Worker.readOnly): puede ver todo

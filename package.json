@@ -1,8 +1,8 @@
 {
-  "name": "luxe-crm-backend",
+  "name": "lureqo-crm",
   "version": "0.1.0",
   "private": true,
-  "description": "Motor de reenvio/scheduler para LUXE FAN MANAGEMENT - CRM Telegram",
+  "description": "Motor de reenvío y automatización para LUREQO CRM",
   "main": "dist/index.js",
   "scripts": {
     "dev": "ts-node-dev --respawn --transpile-only src/index.ts",

@@ -1,4 +1,4 @@
-// Panel Reenviador — LUXE FAN MANAGEMENT
+// Panel Reenviador — LUREQO CRM
 // SPA en JS puro (sin build step). Todo vive dentro de "Reenviador"; el
 // resto de secciones del sidebar son visuales (aun no construidas).
 
@@ -42,7 +42,7 @@ let state = {
   isSuperAdmin: false, // multi-agencia: solo true para PANEL_USERNAME/PANEL_PASSWORD de Railway (ve "Agencias" en el menú)
   viewingOwnAgency: true, // false si el súper-admin ha entrado a "Ver datos" de otra agencia (ver fetchWorkerSession/renderSidenav)
   // Marca blanca: true = esta sesión es de tu propia agencia (legacy-agency,
-  // la única que ve "LUXE FAN MANAGEMENT") - false = una agencia invitada o
+  // la única que ve "LUREQO CRM") - false = una agencia invitada o
   // uno de sus trabajadores, que en vez de eso ve agencyBrandName (su
   // propio nombre) y ningún logo (ver applyBranding).
   isLegacyAgency: true,
@@ -6706,7 +6706,7 @@ async function renderConfigSection(key) {
     await renderTelegramAccountsSection();
   } else if (key === "suscripcion") {
     appEl.appendChild(el("h1", {}, "Suscripción"));
-    appEl.appendChild(el("p", { class: "subtitle" }, `Plan y facturación de ${state.isLegacyAgency ? "LUXE FAN MANAGEMENT" : (state.agencyBrandName || "tu agencia")}.`));
+    appEl.appendChild(el("p", { class: "subtitle" }, `Plan y facturación de ${state.isLegacyAgency ? "LUREQO CRM" : (state.agencyBrandName || "tu agencia")}.`));
     appEl.appendChild(comingSoonCard("Próximamente: detalle del plan contratado y facturación."));
   } else if (key === "general") {
     await renderGeneralConfigSection();
@@ -11408,7 +11408,7 @@ async function fetchWorkerSession() {
 
 /** Marca blanca: pinta el título de la pestaña, el favicon, y el
  * logo/nombre de marca (barra lateral + topbar móvil) según de quién es la
- * sesión actual - SOLO tu propia agencia (legacy-agency) ve "LUXE FAN
+ * sesión actual - SOLO tu propia agencia (legacy-agency) ve "LUREQO
  * MANAGEMENT" y su logo real; cualquier otra agencia, o uno de sus
  * trabajadores, ve el nombre de SU agencia y ningún logo. Se llama una vez
  * al final de fetchWorkerSession() (nada más saber de quién es la sesión),
@@ -11417,23 +11417,18 @@ async function fetchWorkerSession() {
  */
 function applyBranding() {
   const isLegacy = state.isLegacyAgency;
-  const brandName = isLegacy ? "LUXE FAN MANAGEMENT" : (state.agencyBrandName || "Panel");
+  const brandName = isLegacy ? "LUREQO CRM" : (state.agencyBrandName || "Panel");
 
-  document.title = isLegacy ? "LUXE FAN MANAGEMENT — Panel" : `${brandName} — Panel`;
+  document.title = isLegacy ? "LUREQO CRM — Panel" : `${brandName} — Panel`;
 
   const favicon = document.getElementById("faviconLink");
-  if (favicon) favicon.href = isLegacy ? "/assets/logo.png" : "data:,";
+  if (favicon) favicon.href = "data:,";
 
   const topbarLogo = document.getElementById("mobileTopbarLogo");
   const topbarTitle = document.getElementById("mobileTopbarTitle");
   if (topbarLogo) {
-    if (isLegacy) {
-      topbarLogo.src = "/assets/logo.png";
-      topbarLogo.classList.remove("hidden");
-    } else {
-      topbarLogo.removeAttribute("src");
-      topbarLogo.classList.add("hidden");
-    }
+    topbarLogo.removeAttribute("src");
+    topbarLogo.classList.add("hidden");
   }
   if (topbarTitle) topbarTitle.textContent = brandName;
 
@@ -11455,24 +11450,22 @@ function applyBranding() {
     }
   }
   if (brandLogo) {
-    if (isLegacy) {
-      brandLogo.src = "/assets/logo.png";
-      brandLogo.alt = "LUXE FAN MANAGEMENT";
-      brandLogo.classList.remove("hidden");
-    } else {
-      brandLogo.removeAttribute("src");
-      brandLogo.alt = "";
-      brandLogo.classList.add("hidden");
-    }
+    brandLogo.removeAttribute("src");
+    brandLogo.alt = "";
+    brandLogo.classList.add("hidden");
   }
   if (brandText) {
     brandText.innerHTML = "";
     if (isLegacy) {
-      brandText.appendChild(el("div", { class: "brand-title" }, "LUXE FAN"));
-      brandText.appendChild(el("div", { class: "brand-title" }, "MANAGEMENT"));
+      brandBlock.insertBefore(
+        el("div", { class: "brand-initial" }, "L"),
+        brandBlock.firstChild
+      );
+      brandText.appendChild(el("div", { class: "brand-title" }, "LUREQO"));
+      brandText.appendChild(el("div", { class: "brand-title" }, "CRM"));
     } else {
       // Nombre de la agencia en 1-2 líneas (partido por palabras, como el
-      // de LUXE) para que quepa igual en la barra lateral.
+      // de LUREQO CRM) para que quepa igual en la barra lateral.
       const words = brandName.split(" ").filter(Boolean);
       if (words.length > 1) {
         const mid = Math.ceil(words.length / 2);
@@ -11959,7 +11952,7 @@ async function ownerLogout() {
  * Portal de login. Mismo formulario y mismo backend (POST
  * /api/auth/unified-login) para los dos casos - la única diferencia es
  * cosmética: branded=false (ver /login2 en init()) quita el logo, el
- * nombre "LUXE FAN MANAGEMENT" y el título/favicon de la pestaña, para que
+ * nombre "LUREQO CRM" y el título/favicon de la pestaña, para que
  * una agencia que no sea la tuya pueda compartir un acceso que no lleve
  * ninguna marca de LUXE. Las credenciales y el backend son EXACTAMENTE los
  * mismos en los dos - /login2 no es un login "más débil", solo uno sin
@@ -11989,8 +11982,8 @@ function renderOwnerLoginScreen(options = {}) {
   const submitBtn = el("button", { class: "primary", type: "submit" }, "Entrar");
 
   const form = el("form", { class: "owner-login-card" }, [
-    branded ? el("div", { class: "owner-login-logo-ring" }, el("img", { src: "/assets/logo.png", class: "owner-login-logo", alt: "LUXE FAN MANAGEMENT" })) : null,
-    el("h1", {}, branded ? "LUXE FAN MANAGEMENT" : "Iniciar sesión"),
+    branded ? el("div", { class: "owner-login-logo-ring" }, "L") : null,
+    el("h1", {}, branded ? "LUREQO CRM" : "Iniciar sesión"),
     el("p", { class: "hint" }, "Introduce tus credenciales para entrar al panel. Si eres del equipo, usa el email y la contraseña que te haya dado tu agencia."),
     el("div", { class: "field" }, [el("label", {}, "Usuario o email"), userInput]),
     el("div", { class: "field" }, [el("label", {}, "Contraseña"), passInput]),
@@ -12411,7 +12404,7 @@ async function init() {
     // si ni siquiera esto responde, se trata como "sin sesión" (ver abajo)
   }
   // "/login2": el MISMO formulario y el MISMO backend que "/login" (ver
-  // renderOwnerLoginScreen), sin ningún logo ni el nombre "LUXE FAN
+  // renderOwnerLoginScreen), sin ningún logo ni el nombre "LUREQO
   // MANAGEMENT" - un acceso igual de válido para compartir con una agencia
   // que no sea la tuya, sin que vean tu marca ni al entrar.
   if (window.location.pathname === "/login" || window.location.pathname === "/login2") {

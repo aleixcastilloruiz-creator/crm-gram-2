@@ -1,26 +1,111 @@
-/* LUXE CRM — visual layer rebuilt from scratch.
-   The functional app.js remains untouched so every existing module/API flow
-   keeps working while the interface gets a new visual system. */
+/* LUREQO CRM — Aurora Slate UI v2
+   Visual layer only: business logic and API integration remain untouched. */
 :root{
-  --green-950:#06110f;--green-900:#0a1815;--green-850:#0e211c;--green-800:#122a23;
-  --gold-400:#f2d59a;--gold-500:#d7b66f;--gold-600:#a98545;--cream:#f7f4ed;
-  --cream-dim:#b9c1ba;--cream-faint:#74817a;--red:#f07167;--green-ok:#65d19a;
-  --amber:#e9bd5e;--radius:16px;--sidebar-w:248px;--accountlist-w:224px;
+  --bg:#071018;
+  --bg-deep:#050b11;
+  --surface:#0c1721;
+  --surface-2:#101d29;
+  --surface-3:#142534;
+  --line:rgba(164,195,215,.12);
+  --line-strong:rgba(84,211,183,.30);
+  --text:#f2f7f8;
+  --muted:#91a4ae;
+  --muted-2:#657983;
+  --accent:#54d3b7;
+  --accent-2:#36a9e1;
+  --accent-3:#8be4d0;
+  --ok:#62d9a4;
+  --warn:#f1c86a;
+  --danger:#ff7185;
+  --sidebar-w:258px;
+  --accountlist-w:248px;
+  --radius:15px;
+  --shadow:0 22px 65px rgba(0,0,0,.28);
 }
-html{background:#06110f}body{background:radial-gradient(900px 600px at 15% -10%,rgba(215,182,111,.10),transparent 55%),#06110f;color:var(--cream);font-size:14px}
-.sidebar{width:var(--sidebar-w);background:rgba(8,22,18,.96);border-right:1px solid rgba(242,213,154,.10);padding:20px 14px;backdrop-filter:blur(18px)}
-.brand{padding:8px 10px 24px}.brand-title{font-size:12px;letter-spacing:.11em;color:var(--gold-400)}
-.nav-item{padding:10px 12px;border-radius:11px;color:#aeb8b1;transition:.16s}.nav-item:hover{background:rgba(242,213,154,.07);color:#eee}.nav-item.active{background:linear-gradient(90deg,rgba(215,182,111,.17),rgba(215,182,111,.06));color:var(--gold-400);box-shadow:inset 3px 0 var(--gold-500)}
-.workspace{background:transparent}.reenviador-layout{min-height:100vh}.account-list{width:var(--accountlist-w);padding:26px 14px;background:rgba(7,19,16,.42);border-right:1px solid rgba(242,213,154,.08)}
-.account-list-title{font-size:10px;font-weight:700;letter-spacing:.12em;color:#68756e}.account-item{padding:11px;border-radius:12px}.account-item.active{background:rgba(215,182,111,.12);border:1px solid rgba(215,182,111,.14)}
-.account-avatar{width:34px;height:34px}.account-name{font-size:13px}.status-dot{box-shadow:0 0 0 3px rgba(255,255,255,.025)}
-main#app{max-width:none;padding:34px 40px 70px}h1{font-size:25px;letter-spacing:-.02em;color:#f4e5bf}h2{font-size:16px;color:#ead7a9}.subtitle{color:#8f9d95}
-.card,.banner{background:linear-gradient(145deg,rgba(20,43,35,.86),rgba(10,25,21,.90));border:1px solid rgba(242,213,154,.11);border-radius:var(--radius);box-shadow:0 12px 40px rgba(0,0,0,.18)}
-.card{padding:20px 22px}.banner{padding:15px 18px}.section-title-row{margin-bottom:18px!important}
-button,.btn{border-radius:10px!important;border:1px solid rgba(242,213,154,.14)!important;background:#152c24!important;color:#f4f0e8!important;transition:.15s!important;box-shadow:none!important}button:hover,.btn:hover{transform:translateY(-1px);border-color:rgba(242,213,154,.32)!important;background:#1b382e!important}button.primary,.btn.primary,.button-primary{background:linear-gradient(135deg,#d7b66f,#a98545)!important;color:#09110e!important;border-color:transparent!important;font-weight:700}
-input,select,textarea{background:#081713!important;border:1px solid rgba(242,213,154,.13)!important;color:#f4f1e9!important;border-radius:10px!important;outline:none!important}input:focus,select:focus,textarea:focus{border-color:rgba(215,182,111,.55)!important;box-shadow:0 0 0 3px rgba(215,182,111,.08)!important}
-table{border-collapse:separate!important;border-spacing:0!important;overflow:hidden;border-radius:12px}th{background:#10271f!important;color:#cbbd9d!important}td{border-color:rgba(255,255,255,.05)!important}tr:hover td{background:rgba(215,182,111,.035)!important}
-.toast{border-radius:12px!important;background:#17362b!important;border:1px solid rgba(215,182,111,.25)!important;box-shadow:0 15px 50px #0008!important}
-.mobile-topbar{background:#081713!important;border-bottom:1px solid rgba(242,213,154,.1)!important}
-@media(max-width:900px){:root{--sidebar-w:0px;--accountlist-w:190px}main#app{padding:24px 18px 50px}.sidebar{width:0;padding:0;border:0;overflow:hidden}.sidebar.sidebar-mobile-open{width:248px;padding:20px 14px}.account-list{width:190px}}
-@media(max-width:640px){.reenviador-layout{display:block}.account-list{width:100%;border-right:0;border-bottom:1px solid rgba(242,213,154,.08);padding:12px}.account-list .account-item{display:inline-flex;margin-right:4px}.account-list-title{display:none}main#app{padding:20px 14px 44px}}
+*{scrollbar-width:thin;scrollbar-color:#29404c transparent}
+html{background:var(--bg-deep)}
+body{
+  background:
+    radial-gradient(900px 620px at 4% -12%,rgba(54,169,225,.13),transparent 60%),
+    radial-gradient(800px 600px at 94% 2%,rgba(84,211,183,.10),transparent 58%),
+    linear-gradient(180deg,#071018 0%,#050b11 100%);
+  color:var(--text);
+  font-size:14px;
+}
+.shell{background:transparent}
+.sidebar{
+  width:var(--sidebar-w);background:rgba(6,14,21,.86);border-right:1px solid var(--line);
+  padding:18px 14px;backdrop-filter:blur(24px);box-shadow:18px 0 60px rgba(0,0,0,.16)
+}
+.brand{padding:8px 10px 26px;min-height:60px}
+.brand-title{font-size:11px;letter-spacing:.12em;color:#e9f6f4;font-weight:800}
+.brand-title + .brand-title{color:var(--accent)}
+.brand-initial{
+  background:linear-gradient(135deg,var(--accent),var(--accent-2))!important;color:#041014!important;
+  border:0!important;box-shadow:0 10px 30px rgba(84,211,183,.20)!important;border-radius:11px!important
+}
+.nav-item{
+  padding:10px 12px;border-radius:11px;color:#94a8b1;transition:all .18s ease
+}
+.nav-item:hover{background:rgba(255,255,255,.045);color:#fff;transform:translateX(2px)}
+.nav-item.active{
+  background:linear-gradient(90deg,rgba(84,211,183,.15),rgba(54,169,225,.06));color:#f4fffd;
+  box-shadow:inset 3px 0 var(--accent),0 9px 28px rgba(0,0,0,.12)
+}
+.workspace{background:transparent}
+.reenviador-layout{min-height:100vh}
+.account-list{
+  width:var(--accountlist-w);padding:25px 14px;background:rgba(7,15,22,.34);border-right:1px solid var(--line)
+}
+.account-list-title{font-size:10px;font-weight:850;letter-spacing:.16em;color:var(--muted-2)}
+.account-item{padding:11px;border-radius:13px;transition:.18s;border:1px solid transparent}
+.account-item:hover{background:rgba(255,255,255,.035);border-color:var(--line)}
+.account-item.active{background:linear-gradient(135deg,rgba(84,211,183,.13),rgba(54,169,225,.05));border-color:rgba(84,211,183,.22)}
+.account-avatar{width:38px;height:38px;box-shadow:0 7px 22px rgba(0,0,0,.28)}
+.account-name{font-size:13px}.status-dot{box-shadow:0 0 0 3px rgba(255,255,255,.025)}
+main#app{max-width:none;padding:36px 42px 78px}
+h1{font-size:28px;letter-spacing:-.04em;color:#fff}h2{font-size:18px;color:#eaf4f5}.subtitle{color:var(--muted)}
+.card,.banner{
+  background:linear-gradient(145deg,rgba(15,29,41,.94),rgba(8,17,25,.96));
+  border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow)
+}
+.card{padding:21px 23px}.banner{padding:16px 19px}.section-title-row{margin-bottom:19px!important}
+button,.btn{
+  border-radius:10px!important;border:1px solid var(--line)!important;background:#12202b!important;
+  color:#f4f8f9!important;transition:all .17s ease!important;box-shadow:none!important
+}
+button:hover,.btn:hover{transform:translateY(-1px);border-color:rgba(84,211,183,.40)!important;background:#172a38!important}
+button.primary,.btn.primary,.button-primary{
+  background:linear-gradient(135deg,var(--accent),var(--accent-2))!important;color:#041014!important;
+  border-color:transparent!important;font-weight:800;box-shadow:0 9px 28px rgba(54,169,225,.18)!important
+}
+input,select,textarea{
+  background:#08131c!important;border:1px solid var(--line)!important;color:#f1f7f8!important;
+  border-radius:10px!important;outline:none!important
+}
+input::placeholder,textarea::placeholder{color:#61747e!important}
+input:focus,select:focus,textarea:focus{border-color:rgba(84,211,183,.62)!important;box-shadow:0 0 0 3px rgba(84,211,183,.09)!important}
+table{border-collapse:separate!important;border-spacing:0!important;overflow:hidden;border-radius:13px}
+th{background:#11212d!important;color:#c2d0d5!important}td{border-color:rgba(255,255,255,.05)!important}tr:hover td{background:rgba(84,211,183,.035)!important}
+.toast{border-radius:12px!important;background:#10202a!important;border:1px solid rgba(84,211,183,.28)!important;box-shadow:0 18px 55px #0009!important}
+.mobile-topbar{background:rgba(6,14,21,.92)!important;border-bottom:1px solid var(--line)!important;backdrop-filter:blur(18px)}
+.owner-login-mode{
+  background:radial-gradient(720px 520px at 50% 0%,rgba(84,211,183,.16),transparent 63%),
+             radial-gradient(600px 450px at 80% 80%,rgba(54,169,225,.12),transparent 65%),#050b11!important
+}
+.owner-login-card{
+  background:rgba(10,22,31,.91)!important;border:1px solid rgba(164,195,215,.14)!important;
+  border-radius:24px!important;box-shadow:0 35px 110px rgba(0,0,0,.48)!important;backdrop-filter:blur(24px)
+}
+.owner-login-logo-ring{
+  background:linear-gradient(135deg,var(--accent),var(--accent-2))!important;border:0!important;
+  box-shadow:0 16px 45px rgba(84,211,183,.22)!important;color:#041014!important
+}
+.owner-login-card h1{color:#fff!important}.owner-login-card .hint,.owner-login-footnote{color:var(--muted)!important}
+/* Visual polish for common panels generated by the existing app. */
+.modal,.dialog,.dropdown-menu,.popover{background:#0c1822!important;border-color:var(--line)!important;box-shadow:0 28px 90px rgba(0,0,0,.48)!important}
+.badge,.pill{border-color:var(--line)!important;background:rgba(255,255,255,.045)!important;color:#cbd8dc!important}
+.link{color:var(--accent)!important}.empty{color:var(--muted)!important}
+hr{border-color:var(--line)!important}
+@media(max-width:900px){:root{--sidebar-w:0px;--accountlist-w:205px}.sidebar{width:0;padding:0;border:0;overflow:hidden}.sidebar.sidebar-mobile-open{width:258px;padding:18px 14px}main#app{padding:26px 20px 55px}}
+@media(max-width:640px){.reenviador-layout{display:block}.account-list{width:100%;border-right:0;border-bottom:1px solid var(--line);padding:12px}.account-list .account-item{display:inline-flex;margin-right:4px}.account-list-title{display:none}main#app{padding:21px 14px 45px}h1{font-size:23px}}
