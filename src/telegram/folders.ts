@@ -18,11 +18,22 @@ export async function listAccountFolders(client: TelegramClient): Promise<Telegr
 
   const summaries: TelegramFolderSummary[] = [];
   for (const filter of filters as any[]) {
-    if (filter.className !== "DialogFilter") continue; // salta Default/Chatlist especiales
+    // "DialogFilter" son las carpetas normales; "DialogFilterChatlist" son
+    // las carpetas compartidas por enlace ("chat folders" de Telegram, cada
+    // vez más usadas) - antes se descartaban junto con "DialogFilterDefault"
+    // (la carpeta implícita "Todos los chats", esa sí sin título real), así
+    // que a cuentas con carpetas compartidas les faltaban muchas en el
+    // selector. Ambos tipos tienen título + includePeers con la misma forma.
+    if (filter.className !== "DialogFilter" && filter.className !== "DialogFilterChatlist") continue;
     const chatIds: string[] = [];
-    for (const peer of filter.includePeers ?? []) {
+    // OJO: los chats FIJADOS ("pin") dentro de una carpeta los manda Telegram
+    // aparte, en "pinnedPeers" - NO estan repetidos en "includePeers". Contar
+    // solo includePeers se dejaba fuera todos los chats fijados de la
+    // carpeta, asi que una carpeta con muchos chats fijados aparecia con
+    // muchos menos chats de los que tiene de verdad (p.ej. "37 de 91").
+    for (const peer of [...(filter.pinnedPeers ?? []), ...(filter.includePeers ?? [])]) {
       const id = peerToChatId(peer);
-      if (id) chatIds.push(id);
+      if (id && !chatIds.includes(id)) chatIds.push(id);
     }
     summaries.push({
       id: filter.id,
@@ -35,7 +46,55 @@ export async function listAccountFolders(client: TelegramClient): Promise<Telegr
 
 function peerToChatId(peer: any): string | null {
   if (peer.className === "InputPeerChannel") return `-100${peer.channelId}`;
-  if (peer.className === "InputPeerChat") return `${peer.chatId}`;
+  // OJO: a diferencia de un canal/supergrupo, el chatId de un grupo BASICO
+  // (no migrado a supergrupo - el caso tipico de los "grupos restringidos"
+  // de 1 cliente, casi siempre solo 2-3 miembros) se marca en NEGATIVO en
+  // todo el resto del codigo (ver dialog.id.toString() en dialogs.ts, que
+  // usa el mismo "marcado" de Telegram). Devolverlo en positivo aqui hacia
+  // que este chatId nunca coincidiese con el de la lista de chats, y por
+  // tanto la etiqueta de carpeta no apareciese NUNCA para estos grupos
+  // pequeños de cliente (que son justo los que se organizan en carpetas
+  // como "Clientes"/"Grupo cliente").
+  if (peer.className === "InputPeerChat") return `-${peer.chatId}`;
   if (peer.className === "InputPeerUser") return `${peer.userId}`;
   return null;
+}
+
+/**
+ * Añade un chat a una carpeta de Telegram existente por su título (usado
+ * por "Carpetas de Telegram → Sincronizar carpetas automáticamente").
+ * Solo añade: si el chat ya está en la carpeta, o la carpeta no existe, no
+ * hace nada. Si Telegram rechaza el cambio (carpeta llena, límite de la
+ * cuenta...), se informa en vez de reventar la petición que lo llamó -
+ * de momento no se crean carpetas nuevas tipo "Clientes 2" al llenarse.
+ */
+export async function addChatToFolderByTitle(
+  client: TelegramClient,
+  folderTitle: string,
+  chatId: string
+): Promise<{ ok: boolean; reason?: string }> {
+  const result = await client.invoke(new Api.messages.GetDialogFilters());
+  const filters = "filters" in result ? result.filters : (result as any);
+  const filter = (filters as any[]).find(
+    (f) => f.className === "DialogFilter" && (f.title?.text ?? f.title ?? "").toLowerCase() === folderTitle.toLowerCase()
+  );
+  if (!filter) return { ok: false, reason: `No existe una carpeta de Telegram llamada "${folderTitle}".` };
+
+  const already = [...(filter.pinnedPeers ?? []), ...(filter.includePeers ?? [])].some((p: any) => peerToChatId(p) === chatId);
+  if (already) return { ok: true };
+
+  let inputPeer: any;
+  try {
+    inputPeer = await client.getInputEntity(chatId);
+  } catch {
+    return { ok: false, reason: "No se pudo resolver el chat en Telegram." };
+  }
+
+  filter.includePeers = [...(filter.includePeers ?? []), inputPeer];
+  try {
+    await client.invoke(new Api.messages.UpdateDialogFilter({ id: filter.id, filter }));
+    return { ok: true };
+  } catch (err: any) {
+    return { ok: false, reason: err?.errorMessage || err?.message || "Telegram rechazó el cambio (¿carpeta llena?)." };
+  }
 }

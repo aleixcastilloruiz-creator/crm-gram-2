@@ -1,6 +1,7 @@
 import { Account } from "@prisma/client";
 import { prisma } from "../utils/prisma";
 import { sendWhatsAppNotification } from "../utils/notifications";
+import { notifyTelegramBlock } from "../whatsapp/waNotify";
 
 /**
  * Detecta si un error lanzado por GramJS/Telegram corresponde a un
@@ -88,6 +89,12 @@ export async function consumeSoftStartCycle(account: Account): Promise<void> {
 }
 
 async function notify(account: Account, text: string): Promise<void> {
+  // "A quién avisar" (Conectar WhatsApp): el aviso que de verdad llega, ya
+  // que usa el WhatsApp vinculado por QR de la agencia (ver waClient.ts).
+  await notifyTelegramBlock(text);
+  // Ademas, si esta cuenta tiene configurado un numero propio vía Twilio
+  // (notifyWhatsAppTo), se le manda tambien - por compatibilidad con quien
+  // ya lo tuviera montado.
   if (!account.notifyWhatsAppTo) return;
   await sendWhatsAppNotification(account.notifyWhatsAppTo, text);
 }

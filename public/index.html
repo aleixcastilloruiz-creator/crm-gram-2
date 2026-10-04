@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <!-- Título, favicon y logo/nombre de marca se rellenan en caliente desde
+       app.js (ver applyBranding) según la agencia de quien ha iniciado
+       sesión: SOLO tu propia agencia (legacy-agency) ve "LUXE FAN
+       MANAGEMENT" y su logo - cualquier otra agencia (o sus trabajadores)
+       ve el nombre de SU agencia, sin logo ni ninguna marca de LUXE. Nada
+       de eso se deja fijo aquí a propósito, para no "flashear" la marca
+       equivocada ni un instante antes de que app.js decida cuál toca. -->
+  <title>Panel</title>
+  <link rel="icon" id="faviconLink" href="data:," />
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <div id="toast" class="toast hidden"></div>
+
+  <div class="mobile-topbar">
+    <button id="mobileNavToggle" class="mobile-nav-toggle" type="button" aria-label="Abrir menú">☰</button>
+    <img id="mobileTopbarLogo" src="" alt="" class="hidden" />
+    <span class="mobile-topbar-title" id="mobileTopbarTitle"></span>
+  </div>
+  <div id="mobileNavBackdrop" class="mobile-nav-backdrop"></div>
+
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="brand" id="brandBlock">
+        <img id="brandLogo" src="" alt="" class="hidden" />
+        <div class="brand-text" id="brandText"></div>
+      </div>
+      <nav id="sidenav"></nav>
+    </aside>
+
+    <div class="workspace">
+      <div class="reenviador-layout">
+        <aside class="account-list" id="accountList"></aside>
+        <main id="app"></main>
+      </div>
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

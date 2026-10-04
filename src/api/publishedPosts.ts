@@ -1,0 +1,102 @@
+import { FastifyInstance } from "fastify";
+import { prisma } from "../utils/prisma";
+import { getAccountClient } from "../telegram/connectionPool";
+import { resolveEntityById } from "../telegram/dialogs";
+
+/**
+ * "Programar posts → Publicadas": a diferencia de las otras dos pestañas
+ * (que son cosas programadas DESDE este CRM), esto es un espejo de lo que
+ * de verdad hay publicado en Telegram ahora mismo, venga de donde venga -
+ * de "Programar posts" o publicado a mano desde el móvil -, para poder
+ * auditarlo o borrarlo sin salir del panel. Se escanean los canales/grupos
+ * dados de alta en "Canales free" (son los canales conocidos de esta
+ * cuenta); si no hay ninguno, no hay donde mirar.
+ */
+function mediaKind(m: any): string {
+  const media = m.media;
+  if (!media) return "Texto";
+  if (media.className === "MessageMediaPhoto") return "📷 Foto";
+  if (media.className === "MessageMediaDocument") {
+    const attrs = media.document?.attributes || [];
+    if (attrs.some((a: any) => a.className === "DocumentAttributeVideo")) return "🎬 Vídeo";
+    if (attrs.some((a: any) => a.className === "DocumentAttributeAudio")) return "🎧 Audio";
+    return "📎 Archivo";
+  }
+  return "📝 Post";
+}
+
+export async function registerPublishedPostsRoutes(app: FastifyInstance) {
+  app.get("/api/accounts/:id/published-posts", async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const q = request.query as { days?: string };
+    const days = Math.max(1, Math.min(30, Number(q.days) || 7));
+    const cutoffMs = Date.now() - days * 24 * 60 * 60 * 1000;
+
+    const account = await prisma.account.findUniqueOrThrow({ where: { id } });
+    const channels = await prisma.freeChannel.findMany({ where: { accountId: id }, orderBy: { createdAt: "asc" } });
+    if (channels.length === 0) {
+      return { posts: [], reason: "sin_canales" };
+    }
+
+    let client;
+    try {
+      client = await getAccountClient(account);
+    } catch {
+      return reply.code(502).send({ error: "No se pudo conectar con Telegram para leer lo publicado." });
+    }
+
+    const posts: Array<{
+      chatId: string; chatTitle: string; messageId: number; kind: string; text: string; date: string;
+    }> = [];
+
+    for (const ch of channels) {
+      try {
+        const entity = await resolveEntityById(client, ch.chatId);
+        // Vienen ordenados de mas nuevo a mas viejo: en cuanto se cruza el
+        // corte de dias se puede parar, no hace falta traer mas de este canal.
+        const messages = await client.getMessages(entity, { limit: 150 });
+        for (const m of messages as any[]) {
+          const msgDateMs = (m.date || 0) * 1000;
+          if (msgDateMs < cutoffMs) break;
+          if (!m.out) continue; // solo lo que publico esta propia cuenta, no lo que otros admins/bots posteen ahi
+          if (!m.message && !m.media) continue;
+          posts.push({
+            chatId: ch.chatId,
+            chatTitle: ch.title,
+            messageId: m.id,
+            kind: mediaKind(m),
+            text: (m.message || "").slice(0, 300),
+            date: new Date(msgDateMs).toISOString(),
+          });
+        }
+      } catch (err) {
+        request.log.warn(err, `No se pudo leer lo publicado de "${ch.title}"`);
+        // un canal que falle (borrado, sin permisos...) no debe tirar el resto
+      }
+    }
+
+    posts.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+    return { posts: posts.slice(0, 300) };
+  });
+
+  // Borra un post ya publicado directamente en Telegram (no solo en el
+  // panel): es lo mismo que pulsar "Eliminar" en un canal desde la app de
+  // Telegram - revoke:true lo quita para todo el mundo, no solo localmente.
+  app.delete("/api/accounts/:id/published-posts", async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const body = request.body as { chatId?: string; messageId?: number };
+    if (!body.chatId || body.messageId === undefined) {
+      return reply.code(400).send({ error: "Falta el mensaje a borrar" });
+    }
+    const account = await prisma.account.findUniqueOrThrow({ where: { id } });
+    try {
+      const client = await getAccountClient(account);
+      const entity = await resolveEntityById(client, body.chatId);
+      await client.deleteMessages(entity, [body.messageId], { revoke: true });
+      return { ok: true };
+    } catch (err: any) {
+      request.log.error(err);
+      return reply.code(502).send({ error: err?.errorMessage || err?.message || "No se pudo borrar el mensaje en Telegram." });
+    }
+  });
+}

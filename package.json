@@ -11,18 +11,44 @@
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "login:account": "ts-node-dev --transpile-only src/telegram/loginCli.ts",
-    "login:account:prod": "node dist/telegram/loginCli.js"
+    "login:account:prod": "node dist/telegram/loginCli.js",
+    "inspect:account": "ts-node-dev --transpile-only src/telegram/inspectCli.ts",
+    "inspect:account:prod": "node dist/telegram/inspectCli.js",
+    "seed:campaign": "ts-node-dev --transpile-only src/telegram/seedCampaignCli.ts",
+    "seed:campaign:prod": "node dist/telegram/seedCampaignCli.js",
+    "topics:account": "ts-node-dev --transpile-only src/telegram/topicsCli.ts",
+    "topics:account:prod": "node dist/telegram/topicsCli.js",
+    "folder:account": "ts-node-dev --transpile-only src/telegram/folderCli.ts",
+    "folder:account:prod": "node dist/telegram/folderCli.js"
   },
   "dependencies": {
+    "@fastify/cookie": "^9.4.0",
+    "@fastify/static": "^6.12.0",
+    "@hapi/boom": "^10.0.1",
     "@prisma/client": "^5.20.0",
+    "@whiskeysockets/baileys": "^6.7.0",
+    "bcryptjs": "^2.4.3",
+    "big-integer": "^1.6.51",
+    "docxtemplater": "^3.42.4",
     "dotenv": "^16.4.5",
+    "exceljs": "^4.4.0",
     "fastify": "^4.28.1",
+    "heic-convert": "^2.1.0",
     "input": "^1.0.1",
-    "telegram": "^2.26.16",
-    "prisma": "^5.20.0"
+    "jsonwebtoken": "^9.0.2",
+    "pdfkit": "^0.15.0",
+    "pizzip": "^3.1.6",
+    "pino": "^9.5.0",
+    "qrcode": "^1.5.4",
+    "telegram": "^2.26.16"
   },
   "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
+    "@types/jsonwebtoken": "^9.0.7",
     "@types/node": "^20.16.5",
+    "@types/pdfkit": "^0.13.4",
+    "@types/qrcode": "^1.5.5",
+    "prisma": "^5.20.0",
     "ts-node-dev": "^2.0.0",
     "typescript": "^5.6.2"
   }

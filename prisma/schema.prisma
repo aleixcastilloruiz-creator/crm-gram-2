@@ -4,7 +4,8 @@
 // aleatorio + horarios fijos, control anti-baneo) descrito por el usuario.
 
 generator client {
-  provider = "prisma-client-js"
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
 }
 
 datasource db {
@@ -41,12 +42,90 @@ enum LogLevel {
   MISSED // "Horario perdido": un slot de horario fijo se paso sin enviar
 }
 
+enum ScheduledPostStatus {
+  PENDING   // esperando su hora
+  SENT      // publicado con exito
+  FAILED    // se intento publicar y fallo (ver errorMessage)
+  CANCELLED // el usuario lo borro antes de que se publicara
+}
+
+enum ScheduledPostKind {
+  CHANNEL // publica en un canal/grupo de Telegram
+  STORY   // publica una Historia de Telegram (requiere cuenta Premium)
+}
+
+// "Historia de Telegram → a quien se le enseña": mismas 3 opciones que da
+// Telegram en la app. "Todos" es la unica que no exige tener Premium.
+enum StoryPrivacy {
+  EVERYONE
+  CONTACTS
+  CLOSE_FRIENDS
+}
+
+// ---------- Multi-agencia ----------
+// Una Agencia = un cliente de LUXEFAN con su propio panel privado dentro del
+// MISMO despliegue de Railway: todo lo que cuelgue de agencyId (cuentas de
+// Telegram, equipo...) queda aislado del resto. El súper-admin (login con
+// PANEL_USERNAME/PANEL_PASSWORD de Railway, el mismo candado de siempre)
+// crea/gestiona agencias desde /api/agencies, pero NO entra a ver los chats
+// ni datos de ninguna - solo alta/baja, ver requireSuperAdmin en auth.ts.
+//
+// La agencia "legacy-agency" (id FIJO, sembrada sola al arrancar si no
+// existe - ver utils/agencyMigration.ts) es la propia LUXE FAN MANAGEMENT:
+// todo lo que ya existía en el CRM antes de esta funcionalidad se queda ahí
+// automáticamente (agencyId por defecto), sin perder ni mezclar nada. Esa
+// agencia en concreto se sigue gestionando con las credenciales de entorno
+// de siempre (PANEL_USERNAME/PANEL_PASSWORD), no con ownerEmail/
+// ownerPasswordHash - esos dos campos son solo para las agencias NUEVAS que
+// invite el súper-admin.
+model Agency {
+  id                String   @id @default(cuid())
+  name              String   // nombre de la agencia, ej "Agencia de Marta"
+  ownerEmail        String   @unique // login del Dueño/Jefe de ESTA agencia (no aplica a "legacy-agency")
+  ownerPasswordHash String
+  active            Boolean  @default(true) // false = suspendida por el súper-admin: nadie de esta agencia puede entrar
+  // "Ocultar" (Configuración → Agencias): esta agencia no aparece en el
+  // listado del súper-admin (ni, por tanto, en ninguna estadística o menú
+  // que recorra "todas las agencias") - no afecta EN NADA a su acceso: su
+  // dueño y su equipo siguen entrando y usando el panel exactamente igual,
+  // y el súper-admin sigue pudiendo entrar a "Ver datos" de ella (ver
+  // POST /api/agencies/:id/view-as) mientras tenga su id. Solo cambia si
+  // sale en la tabla por defecto (ver GET /api/agencies, ?includeHidden=true
+  // para seguir pudiendo gestionarla desde el panel).
+  hidden            Boolean  @default(false)
+  createdAt         DateTime @default(now())
+}
+
 model Account {
   id            String   @id @default(cuid())
+  // A qué agencia pertenece esta cuenta de Telegram. Sin relación de Prisma
+  // a propósito: al añadir esta columna a filas YA existentes, `prisma db
+  // push` necesitaría que la fila Agency "legacy-agency" ya existiera ANTES
+  // de crear la restricción de clave foránea - pero la propia tabla Agency
+  // se crea en el mismo push, así que esa fila todavía no existe en ese
+  // instante (se siembra después, al arrancar la app - ver
+  // utils/agencyMigration.ts). Por eso el aislamiento se hace a mano en el
+  // código (ver utils/agencyContext.ts), no con una FK de base de datos.
+  agencyId      String   @default("legacy-agency")
   label         String   // nombre visible, ej "Zoweey"
   phoneNumber   String   @unique
   sessionString String   // sesion MTProto cifrada en reposo (ver ENCRYPTION.md)
   timezone      String   @default("Europe/Madrid")
+
+  // Carpeta de Telegram elegida en el filtro del chat de SFS para esta
+  // cuenta - se recuerda de forma permanente (no solo mientras dura la
+  // pestaña del navegador), por eso vive aqui y no solo en mensajesState.
+  sfsFolder     String?
+
+  // Canal/grupo fijo de la pestaña "Grupo SFS" (Configuración… no, vive
+  // dentro del propio SFS): se elige una vez por creadora y se recuerda de
+  // forma permanente, igual que sfsFolder de arriba - así la próxima vez
+  // que se entra en esa pestaña ya está listo para escribir y mandar, sin
+  // tener que volver a buscarlo. sfsGroupTitle se guarda aparte para poder
+  // pintar el nombre al instante sin tener que volver a pedirle la entidad
+  // a Telegram solo para mostrar el selector.
+  sfsGroupChatId String?
+  sfsGroupTitle  String?
 
   // Interruptor maestro: "Encender/Apagar reenviador" de la cuenta.
   // Con esto en false, NINGUNA campaña de esta cuenta envia nada,
@@ -75,12 +154,772 @@ model Account {
   // Twilio (ver notifications.ts) con las credenciales globales del .env.
   notifyWhatsAppTo String?
 
+  // Grupo de WhatsApp (id "...@g.us" del WhatsApp conectado en "Conectar
+  // WhatsApp") al que avisar cuando se registra una venta a un fan de esta
+  // modelo, si "Mandar los personalizados a estos grupos" está activado
+  // (ver WhatsAppSettings). Se elige en la tabla de esa pantalla.
+  salesTrackingWhatsAppGroupId String?
+
+  // "Precios" de Configuración → Modelos → esta creadora: texto libre para
+  // que las chatters sepan a cuanto vender, igual que en el panel de referencia.
+  pricesInfo String @default("")
+
+  // Informes → Nóminas Chatter's… no, Nóminas Modelos: "de siempre" de esta
+  // modelo, para rellenar el formulario de "Generar nómina" sin escribirlo
+  // cada vez (igual que Worker.payrollFixedSalary/payrollCommissionPct para
+  // Nóminas Chatter's) - sigue siendo editable nómina a nómina.
+  modelPayrollCollaboratorName String? // "Nombre del colaborador" (nombre legal, no el artístico)
+  modelPayrollFixedSalary      Float?
+
+  freeChannels FreeChannel[]
+
+  // Carpetas de Telegram (ademas de los chats privados normales) que
+  // tambien deben aparecer en el listado de "Mensajes", para poder entrar a
+  // los grupos restringidos con clientes (u otras carpetas tipo "Posibles",
+  // "Clientes"...) sin salir del panel. JSON string[] con el TITULO exacto
+  // de la carpeta tal y como esta en Telegram.
+  extraMessageFolders String @default("[]")
+
+  // "Contenido" de la modelo: el grupo/canal con temas (sexting, lenceria,
+  // fotos...) desde el que se envian packs a los fans en el apartado
+  // Mensajes (boton de la carpeta junto al cuadro de texto).
+  contentGroupChatId String?
+  contentGroupTitle  String?
+
+  // "Colorear por carpeta" en la vista "Todos los medios" de la bóveda:
+  // solo guarda la preferencia, la pinta el frontend.
+  contentColorByFolder Boolean @default(false)
+
+  // "Bloqueo automático por país": prefijos de país (ver telegram/phoneCountry.ts)
+  // cuyos fans se bloquean solos en Telegram nada mas escribir por chat
+  // directo. JSON string[] con los prefijos (ej. ["1","7"]).
+  blockedCountries String @default("[]")
+
+  // "Excluir carpeta de Telegram": lo contrario de extraMessageFolders -
+  // saca de la lista de "Mensajes" los chats de estas carpetas (ej equipo
+  // interno que no son fans). Mismo formato: JSON string[] de titulos.
+  excludedMessageFolders String @default("[]")
+
+  // "Carpetas de Telegram → Sincronizar carpetas automáticamente": si esta
+  // encendido, al ponerle una lista a un fan (Cliente, Grupo cliente,
+  // Posibles, SFS, TW) se añade su chat a la carpeta de Telegram indicada
+  // aqui para esa lista. folderSyncMap es JSON {"Cliente":"Clientes", ...}.
+  autoSyncFoldersEnabled Boolean @default(false)
+  folderSyncMap          String  @default("{}")
+
+  // "Grupos restringidos → Cuenta ayudante": si Telegram rechaza crear el
+  // grupo restringido desde esta cuenta (USER_RESTRICTED), se crea con la
+  // cuenta elegida aqui en su lugar, dejando a esta cuenta como admin.
+  restrictedGroupHelperAccountId String?
+
+  quickReplies QuickReply[]
+  sfsPackages  SfsPackage[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   sourceGroups SourceGroup[]
   campaigns    Campaign[]
   logs         SendLog[]
+  accountNote  AccountNote?
+  fanNotes     FanNote[]
+  fanSales     FanSale[]
+  chatterMessageLogs ChatterMessageLog[]
+  cachedDialogs CachedDialog[]
+  promoAdminPrices       PromoAdminPrice[]
+  promoGroupAccounts     PromoGroupAccount[]
+  promoGroupAttributions PromoGroupFanAttribution[]
+  scripts      Script[]
+  scriptCategories ScriptCategory[]
+  guionScripts GuionScript[]
+  emojiPacks   AccountEmojiPack[]
+  contentFavorites ContentFavorite[]
+  contentNotes ContentNote[]
+  contentSendLogs ContentSendLog[]
+  restrictedGroups ClientRestrictedGroup[]
+  hiddenDialogs HiddenDialog[]
+  workerPermissions WorkerPermission[]
+  paymentMutedChats PaymentMutedChat[]
+  paymentDetectionEvents PaymentDetectionEvent[]
+  scheduledPosts ScheduledPost[]
+  sfsNotes     SfsNote[]
+  japOrders    JapOrder[]
+  modelPayrolls ModelPayroll[]
+}
+
+// ---------- Conectar WhatsApp ----------
+// El WhatsApp que se vincula por QR en "Conectar WhatsApp" es de toda la
+// agencia (uno solo, no por modelo) - lo usan el Detector de pagos y el
+// aviso de ventas. Al ser una libreria no oficial (imita WhatsApp Web, no
+// hay API para esto igual que con Twilio), la sesion vinculada (claves de
+// Signal, credenciales...) se guarda aqui en la BD en vez de en disco,
+// porque el contenedor de Railway no tiene disco persistente entre
+// despliegues - sin esto, cada "railway up" obligaria a volver a escanear
+// el QR. Una fila por "clave" que pide guardar Baileys (creds, sesiones,
+// pre-keys...), igual que el adaptador de "multi file auth state" oficial
+// pero contra la BD en vez de contra archivos.
+model WhatsAppAuthKey {
+  id        String   @id // ej "creds", "session-xxx", "app-state-sync-key-yyy"
+  data      String   // JSON (con Buffers codificados) tal cual lo pide Baileys
+  updatedAt DateTime @updatedAt
+}
+
+// Configuracion de a quien avisar por este WhatsApp: fila unica ("singleton").
+model WhatsAppSettings {
+  id String @id @default("singleton")
+
+  // "A quien avisar" del Detector de pagos: un destino por linea, cada uno
+  // un id de grupo de WhatsApp ("...@g.us") o un numero E.164 (+34...).
+  paymentDestinations String @default("")
+
+  // "Grupos de seguimiento de las modelos": grupo de WhatsApp para "Todos
+  // los trabajadores" (aparte del grupo propio de cada modelo, que se
+  // guarda en Account.salesTrackingWhatsAppGroupId).
+  allWorkersGroupId String?
+
+  // Checkbox "Mandar los personalizados a estos grupos": si esta apagado,
+  // registrar una venta no avisa a ningun grupo de WhatsApp (el resto de
+  // la app sigue funcionando igual).
+  notifySalesToGroups Boolean @default(false)
+
+  // Que datos lleva el aviso de venta, por separado para el grupo de todos
+  // y para el grupo propio de cada modelo (tabla "Que mas lleva el mensaje").
+  allGroupIncludePrice    Boolean @default(true)
+  allGroupIncludeSoldBy   Boolean @default(true)
+  modelGroupIncludePrice  Boolean @default(false)
+  modelGroupIncludeSoldBy Boolean @default(false)
+
+  updatedAt DateTime @updatedAt
+}
+
+// "Equipo": trabajadores con su propio login (sin necesitar el numero de
+// telefono/sesion de la modelo). role "admin" ve y gestiona todo (la propia
+// agencia); role "worker" solo ve, cuenta por cuenta y apartado por
+// apartado, lo que se le conceda explicitamente en WorkerPermission.
+model Worker {
+  id           String   @id @default(cuid())
+  // Misma idea que Account.agencyId (ver comentario allí): sin FK de base de
+  // datos a propósito, por el mismo problema de arranque con `prisma db
+  // push`. Un trabajador siempre pertenece a la MISMA agencia que quien lo
+  // dio de alta (nunca se puede elegir a mano).
+  agencyId     String   @default("legacy-agency")
+  email        String   @unique
+  passwordHash String
+  name         String
+  role         String   @default("worker") // "admin" | "worker"
+  active       Boolean  @default(true)
+  createdAt    DateTime @default(now())
+
+  // "¿Puede entrar también desde el navegador?" (Equipo → Permisos): ahora
+  // SÍ restringe de verdad (ver isDesktopAppRequest en utils/auth.ts) -
+  // false (el nuevo valor por defecto para un trabajador nuevo) exige
+  // entrar desde la app de escritorio empaquetada (ver carpeta desktop/),
+  // que es la única forma de bloquear/avisar de verdad las capturas de
+  // pantalla; un navegador normal no puede. Un trabajador YA existente de
+  // antes de este cambio se queda con el valor que ya tuviera guardado (no
+  // se retoca en masa), así que nadie se queda bloqueado de golpe sin la
+  // app instalada todavía.
+  canUseBrowser Boolean @default(false)
+
+  // "Solo lectura" (Equipo → Permisos): el dueño (de cualquier agencia,
+  // legacy o nueva) puede marcar a un trabajador para que pueda VER todo lo
+  // de siempre pero no pueda tocar nada - ni enviar mensajes, ni registrar
+  // ventas, ni programar posts, ni nada que sea escritura. Se aplica en un
+  // único sitio (ver el hook onRequest en index.ts, justo donde ya se
+  // comprueba canUseBrowser) bloqueando cualquier método que no sea GET
+  // para este trabajador, sea la ruta que sea - así no hace falta tocar una
+  // por una todas las rutas de escritura que ya existen o que se añadan en
+  // el futuro. false por defecto para no bloquear de golpe a nadie ya
+  // existente.
+  readOnly Boolean @default(false)
+
+  // "Días y modelos": que cuentas le tocan a este trabajador cada dia de la
+  // semana, solo como aviso (no quita acceso). JSON tipo
+  // {"lunes":["accId1","accId2"], "martes":[...], ...}. Vacio = nunca avisa.
+  scheduleJson String @default("{}")
+
+  // "Excepciones puntuales para este empleado" (como en TeleCrew): permisos
+  // finos ademas de Mensajes/SFS. JSON tipo {"vaultScreenshots":false,
+  // "scheduleContent":false,"quickReplies":false,"sfsPackages":false,
+  // "scripts":false}. Se guardan ya, aunque todavia no bloquean nada en el
+  // resto de rutas -eso queda para la siguiente ronda-.
+  extraPermissionsJson String @default("{}")
+
+  // Valores por defecto para "Configuración → Nóminas" (ver Payroll más
+  // abajo): se rellenan solos al generar una nómina nueva de este
+  // trabajador, para no tener que volver a escribirlos cada quincena -
+  // pero siguen siendo editables por nómina, no fijos.
+  payrollFixedSalary   Float?
+  payrollCommissionPct Float  @default(10)
+
+  permissions WorkerPermission[]
+  activityPings WorkerActivityPing[]
+  payrolls      Payroll[]
+  captureAttempts CaptureAttempt[]
+  clockEvents     WorkerClockEvent[]
+  noClockInAlerts NoClockInAlert[]
+}
+
+// "Horas trabajadas": un latido cada ~30s desde el navegador de un
+// trabajador mientras tiene Mensajes/Mensajes Pro abierto. Con eso se
+// reconstruyen sesiones, tiempo inactivo y desconexiones -no hace falta
+// nada mas pesado que esto-. "active" = hubo una interaccion real (mandar
+// un mensaje, hacer clic) desde el latido anterior; "hasUnreadFans" = en
+// ese momento el trabajador tenia algun fan con mensajes sin leer en las
+// cuentas a las que tiene acceso.
+model WorkerActivityPing {
+  id            String   @id @default(cuid())
+  workerId      String
+  worker        Worker   @relation(fields: [workerId], references: [id], onDelete: Cascade)
+  at            DateTime @default(now())
+  active        Boolean  @default(false)
+  hasUnreadFans Boolean  @default(false)
+
+  @@index([workerId, at])
+}
+
+// "Seguridad → Capturas de pantalla": un intento de captura detectado
+// dentro de la app de escritorio (ver carpeta desktop/), nunca desde un
+// navegador normal - un navegador no tiene forma fiable de detectar Impr
+// Pant, así que esto solo se rellena cuando el trabajador usa la app
+// empaquetada (ver desktop/main.js, que intercepta la tecla y avisa al
+// backend con POST /api/security/capture-attempt). "view" es la sección en
+// la que estaba en ese momento (state.currentView del frontend, ej.
+// "mensajes"/"sfs"), para que el aviso al dueño diga "en qué parte estaba".
+// Multi-agencia: agencyId plano, sin relación de Prisma, por el mismo
+// motivo que Account.agencyId/Worker.agencyId (ver esos comentarios) - el
+// trabajador SÍ tiene relación normal a Worker (igual que
+// WorkerActivityPing) porque no hay problema de arranque ahí, solo con
+// Agency.
+model CaptureAttempt {
+  id         String   @id @default(cuid())
+  workerId   String
+  worker     Worker   @relation(fields: [workerId], references: [id], onDelete: Cascade)
+  agencyId   String   @default("legacy-agency")
+  view       String   // sección del panel en la que estaba (state.currentView)
+  accountId  String?  // cuenta concreta, si aplica (puede no haber ninguna seleccionada)
+  at         DateTime @default(now())
+
+  @@index([agencyId, at])
+}
+
+// "Fichar" (Configuración → Seguridad / panel del trabajador): cada vez que
+// un trabajador entra/sale de turno o abre/cierra un descanso se guarda una
+// fila aquí - de la SUCESIÓN de filas (ver getClockStatus en api/clock.ts)
+// se deduce si está fichado ahora mismo, si está en descanso, y cuánto
+// descanso lleva gastado hoy (para repartir los 30 min en varios tramos).
+// "type": "in" | "out" | "break_start" | "break_end". Multi-agencia: mismo
+// patrón que CaptureAttempt (agencyId plano, relación normal a Worker).
+model WorkerClockEvent {
+  id       String   @id @default(cuid())
+  workerId String
+  worker   Worker   @relation(fields: [workerId], references: [id], onDelete: Cascade)
+  agencyId String   @default("legacy-agency")
+  type     String
+  at       DateTime @default(now())
+
+  @@index([workerId, at])
+}
+
+// "Seguridad → Sin fichar": aviso al dueño cuando un trabajador lleva más de
+// 3 minutos activo en el CRM (mandando latidos, ver workHours.ts) sin haber
+// fichado la entrada - misma forma que CaptureAttempt (incluido "view", la
+// sección en la que estaba) para poder reutilizar el mismo listado/aviso en
+// vivo de Seguridad (ver security.ts).
+model NoClockInAlert {
+  id        String   @id @default(cuid())
+  workerId  String
+  worker    Worker   @relation(fields: [workerId], references: [id], onDelete: Cascade)
+  agencyId  String   @default("legacy-agency")
+  view      String
+  accountId String?
+  at        DateTime @default(now())
+
+  @@index([agencyId, at])
+}
+
+// Ajustes globales sencillos tipo clave/valor (ej. Informes → Horas
+// trabajadas: minutos sin responder para "desconectado", descanso
+// permitido por dia). Un valor por fila, todo como texto.
+model AppSetting {
+  key   String @id
+  value String
+}
+
+// Un permiso = esta cuenta (modelo) + este apartado, concedido a este
+// trabajador. section: "mensajes" | "mensajes-pro" | "sfs" (los tres
+// apartados a los que un trabajador puede llegar a tener acceso).
+model WorkerPermission {
+  id        String   @id @default(cuid())
+  workerId  String
+  worker    Worker   @relation(fields: [workerId], references: [id], onDelete: Cascade)
+  accountId String
+  account   Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  section   String
+  createdAt DateTime @default(now())
+
+  @@unique([workerId, accountId, section])
+}
+
+// "Respuestas rápidas" de Configuración → Modelos → esta creadora: textos
+// hechos para que las chatters los manden con un clic desde el chat.
+model QuickReply {
+  id        String   @id @default(cuid())
+  accountId String
+  account   Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  text      String
+  createdAt DateTime @default(now())
+}
+
+// "SFS (intercambios con otras modelos)": paquetes listos (medios de la
+// bóveda de esta cuenta + texto) que las chatters mandan con un clic al
+// pactar una promo cruzada con otra modelo. mediaRefs es JSON con los
+// mensajes elegidos de la bóveda: [{"id":"123","caption":"...","type":"photo"}].
+model SfsPackage {
+  id          String   @id @default(cuid())
+  accountId   String
+  account     Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  name        String
+  mediaRefs   String   @default("[]")
+  captionText String   @default("")
+  createdAt   DateTime @default(now())
+}
+
+// "Emoji premium" de una cuenta: sets de emoji animados de Telegram
+// (t.me/addemoji/<shortName>) enlazados a esta modelo, para poder
+// insertarlos en el chat igual que en el panel de referencia. Maximo 5
+// packs por cuenta (limite aplicado en la API).
+model AccountEmojiPack {
+  id        String   @id @default(cuid())
+  accountId String
+  account   Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  shortName String   // nombre corto del set, ej "paintown" en t.me/addemoji/paintown
+  title     String?
+  createdAt DateTime @default(now())
+
+  @@unique([accountId, shortName])
+}
+
+// "Notas de la modelo": info general de la cuenta (una por cuenta), tal y
+// como se ve en el apartado "Mensajes" del panel de referencia.
+model AccountNote {
+  accountId String   @id
+  account   Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  info      String   @default("")
+  updatedAt DateTime @updatedAt
+}
+
+// Copia en base de datos de la lista de conversaciones de "Mensajes" (la
+// normal, no SFS) de cada cuenta. La cache en memoria (ver dialogsCache.ts)
+// sigue siendo la que se usa mientras el servidor esta vivo -es instantanea,
+// esta tabla no se toca en ese camino caliente-, pero esa cache en memoria se
+// vacia entera con cada reinicio/despliegue, y justo despues la primera
+// carga de Mensajes vuelve a ser lenta porque hay que pedirle a Telegram la
+// lista entera otra vez. Esta tabla es la copia que SI persiste: al
+// arrancar, se sirve desde aqui al instante mientras se refresca de Telegram
+// en segundo plano (ver getCachedDialogs), y se mantiene sola gracias al
+// mismo refresco periodico y a los eventos en vivo que ya existian -no hace
+// falta ningun proceso ni comando aparte para mantenerla al dia.
+model CachedDialog {
+  id                String    @id @default(cuid())
+  accountId         String
+  account           Account   @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  chatId            String
+  title             String
+  isUser            Boolean
+  isGroup           Boolean
+  kind              String    // "user" | "group" | "channel"
+  unreadCount       Int       @default(0)
+  lastMessage       String    @default("")
+  lastMessageDate   DateTime?
+  lastMessageOut    Boolean   @default(false)
+  participantsCount Int?
+  username          String? // @usuario de Telegram del fan, si tiene uno puesto (ver usernameOf en dialogs.ts)
+  updatedAt         DateTime  @updatedAt
+
+  @@unique([accountId, chatId])
+}
+
+// "Notas del fan": una nota por conversacion (cuenta + chat de Telegram),
+// con lista/etiqueta (ej "Cliente") y notas libres. Las ventas van aparte,
+// en FanSale, para poder llevar un historial (no solo un importe suelto).
+model FanNote {
+  id        String   @id @default(cuid())
+  accountId String
+  account   Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  chatId    String   // id de Telegram del chat/usuario (el "fan")
+  chatTitle String?  // nombre visible en el momento de guardar, por si cambia
+  list      String?  // etiqueta rapida, ej "Cliente", "Prioridad"
+  note      String   @default("")
+
+  // "Bloqueo automático por país": si este fan fue bloqueado solo porque
+  // escribio desde un pais de la lista negra, y si despues se desbloqueo a
+  // mano (para no volver a bloquearlo nunca mas automaticamente).
+  autoBlockedByCountry Boolean @default(false)
+  manuallyUnblocked    Boolean @default(false)
+
+  updatedAt DateTime @updatedAt
+
+  @@unique([accountId, chatId])
+}
+
+// Historial de ventas realizadas a un fan concreto (cuenta + chat), tal y
+// como se ve en el apartado "Vendido a este fan" del panel de referencia.
+model FanSale {
+  id            String   @id @default(cuid())
+  accountId     String
+  account       Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  chatId        String   // id de Telegram del chat/usuario (el "fan")
+  amount        Float
+  date          DateTime
+  service       String?  // ej "Pack de fotos", "Videollamada"
+  paymentMethod String?  // ej "Transferencia", "Tarjeta", "Crypto", "OnlyFans"
+  soldBy        String?  // quien hizo la venta (empleada/o)
+  detail        String?
+  paymentRef    String?  // referencia/nota del pago adjuntado
+  createdAt     DateTime @default(now())
+
+  incomingPayments IncomingPayment[] // ingreso(s) de Pagos ya adjuntados a esta venta
+
+  @@index([accountId, chatId])
+}
+
+// "Pagos" → "Cuentas de cobro": una conexión de solo lectura a Stripe o
+// PayPal de la agencia (o de una o varias modelos concretas), para traer los
+// pagos que entran sin tener que mirar Stripe/PayPal a mano. Las credenciales
+// se guardan cifradas (ver utils/crypto.ts, mismo cifrado que ya se usaba
+// para las sesiones de Telegram) - nunca en claro.
+//
+// Al "desconectar" una cuenta de cobro no se borra de verdad (active=false):
+// los ingresos que ya se trajeron de ella tienen que seguir viéndose en el
+// historial con su nombre (con un aviso "(eliminada)" en vez de desaparecer
+// o quedarse huérfanos), igual que un grupo restringido antiguo sigue
+// mostrando su título aunque ya no exista.
+model PaymentAccount {
+  id            String   @id @default(cuid())
+  // Sin relación de Prisma a propósito, mismo motivo que Account.agencyId
+  // (ver comentario allí): evita el problema de arranque de `prisma db push`
+  // con la fila Agency "legacy-agency" todavía sin existir.
+  agencyId      String   @default("legacy-agency")
+  kind          String   // "stripe" | "paypal"
+  label         String   // nombre puesto a mano al conectarla (ej. "Stripe agencia")
+  scope         String   // "agency" (cobra para todas las modelos) | "models" (solo las de accountIds)
+  accountIds    String   @default("[]") // JSON con los Account.id cubiertos, solo si scope="models"
+  credentials   String   // cifrado (encryptSecret): JSON con la clave/credenciales de la API
+  sandbox       Boolean  @default(false) // PayPal: credenciales de pruebas, no de la cuenta real
+  active        Boolean  @default(true) // false = "desconectada" (soft-delete, ver comentario de arriba)
+  lastSyncedAt  DateTime?
+  lastSyncError String?
+  createdAt     DateTime @default(now())
+
+  incomingPayments IncomingPayment[]
+}
+
+// Un pago concreto traído de Stripe o PayPal (un cargo/transacción ya
+// cobrados). "LIBRE" en el panel = fanSaleId todavía null, es decir, sin
+// adjuntar a ninguna venta de FanSale.
+model IncomingPayment {
+  id               String   @id @default(cuid())
+  paymentAccountId String
+  paymentAccount   PaymentAccount @relation(fields: [paymentAccountId], references: [id], onDelete: Cascade)
+  externalId       String   // id del cargo (Stripe) o de la transacción (PayPal)
+  payerName        String?
+  payerEmail       String?
+  amount           Float
+  currency         String   @default("EUR")
+  occurredAt       DateTime
+  fanSaleId        String?
+  fanSale          FanSale? @relation(fields: [fanSaleId], references: [id], onDelete: SetNull)
+  createdAt        DateTime @default(now())
+
+  @@unique([paymentAccountId, externalId])
+  @@index([occurredAt])
+  @@index([fanSaleId])
+}
+
+// Historial de mensajes ENVIADOS por el equipo a un fan desde Mensajes o
+// Mensajes Pro (fila "Enviado" del Dashboard de Informes, como en el panel
+// de referencia). Solo registra mensajes de texto escritos a mano desde el
+// chat -no todo el historial de la conversación, ni lo que escribe el fan-,
+// así que el Dashboard solo mostrará actividad a partir de que esto se
+// desplegó (igual que "Acumulado anterior al CRM" ya hacía con las ventas).
+model ChatterMessageLog {
+  id              String   @id @default(cuid())
+  accountId       String
+  account         Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  chatId          String   // id de Telegram del chat/fan
+  chatTitle       String?  // nombre visible del fan en el momento de enviar
+  workerName      String   // "Chatter": nombre del trabajador logueado, o de la cuenta luxe si envía el dueño
+  message         String
+  responseSeconds Int?     // segundos desde el último mensaje del fan (si se pudo calcular), para "Tiempo de respuesta"
+  sentAt          DateTime @default(now())
+
+  @@index([accountId, sentAt])
+  @@index([workerName])
+}
+
+// "Nóminas" (Configuración → Nóminas): una fila por hoja de pago generada
+// para un trabajador en una quincena/periodo concreto. Los totales
+// (totalSales, commissionAmount, totalAmount) se CALCULAN y se guardan como
+// una foto fija en el momento de generar la nómina (a partir de FanSale,
+// sumando lo vendido por ese trabajador - soldBy - dentro del periodo) - así
+// una nómina ya generada no cambia de importe si luego se corrige o añade
+// una venta antigua, igual que una nómina real ya entregada no cambia.
+// salesByAccountJson guarda el desglose "Ventas totales <Modelo>" tal y como
+// se ve en la plantilla (PAGO_<nombre>.docx que compartió el dueño de la
+// agencia): [{accountLabel, amount}].
+model Payroll {
+  id       String  @id @default(cuid())
+  // Sin relación de Prisma a propósito, mismo motivo que Account.agencyId.
+  // Hace falta como columna propia (no basta con mirar worker.agencyId)
+  // porque workerId puede quedarse en null si se borra el trabajador, y la
+  // nómina ya generada tiene que seguir sabiendo de qué agencia es.
+  agencyId String  @default("legacy-agency")
+  workerId String?
+  worker   Worker? @relation(fields: [workerId], references: [id], onDelete: SetNull)
+
+  // Foto fija de nombre/rol en el momento de generar (igual que
+  // ChatterMessageLog.workerName): si el trabajador se borra o cambia de
+  // nombre despues, la nómina ya generada no debe cambiar ni perderse.
+  workerName     String
+  role           String?
+  modelsManaged  String? // "Samara, Cloe, Zoweey y Mery" ya formateado, para la plantilla
+
+  periodStart DateTime
+  periodEnd   DateTime
+
+  fixedSalary   Float
+  commissionPct Float @default(10)
+  manualExtraSales Float @default(0) // ventas sueltas metidas a mano (no registradas en el CRM), sumadas a totalSales antes de calcular la comisión
+  totalSales    Float // suma de FanSale.amount atribuidas a este trabajador en el periodo + manualExtraSales
+  commissionAmount Float
+  bonus         Float @default(0)
+  totalAmount   Float // fixedSalary + commissionAmount + bonus
+
+  paymentDate   DateTime?
+  paymentMethod String?
+
+  salesByAccountJson String @default("[]")
+
+  createdAt DateTime @default(now())
+
+  @@index([workerId])
+  @@index([periodEnd])
+}
+
+// Informes → Nóminas Modelos: hoja de pago de una MODELO (no de una
+// chatter/trabajadora - eso es Payroll de arriba), con la plantilla propia
+// que compartió el dueño de la agencia (HOJA DE PAGO MODELO -
+// templates/model-payroll-template.docx). A diferencia de Payroll, aquí no
+// hay comisión sobre ventas del CRM: la modelo cobra un importe fijo que
+// decide el dueño ("TOTAL CON EL % MODELO" en la plantilla, con ese nombre
+// tal cual porque así lo tenía él ya escrito) más bonificaciones sueltas
+// por servicios personalizados (videollamadas, contenido a medida...),
+// desglosadas una a una. Igual que Payroll, se guarda como foto fija en el
+// momento de generar - una nómina ya generada no cambia si luego se edita
+// la cuenta o sus valores "de siempre".
+model ModelPayroll {
+  id        String   @id @default(cuid())
+  // Sin relación de Prisma a propósito, mismo motivo que Payroll.agencyId
+  // (columna propia porque accountId puede quedarse en null).
+  agencyId  String   @default("legacy-agency")
+  accountId String?
+  account   Account? @relation(fields: [accountId], references: [id], onDelete: SetNull)
+
+  stageName        String // "Nombre artístico" (Account.label en el momento de generar)
+  collaboratorName String // "Nombre del colaborador" (nombre legal, texto libre)
+
+  periodStart DateTime
+  periodEnd   DateTime
+
+  fixedSalary Float  @default(0) // "TOTAL CON EL % MODELO" de la plantilla: importe fijo que decide el dueño, no una comisión calculada
+  bonusesJson String @default("[]") // [{concept, amount}] - "Desglose de bonificaciones"
+  bonusTotal  Float  @default(0)
+  totalAmount Float // fixedSalary + bonusTotal
+
+  paymentDate   DateTime?
+  paymentMethod String?
+
+  createdAt DateTime @default(now())
+
+  @@index([accountId])
+  @@index([periodEnd])
+}
+
+// Contenido de la bóveda marcado como favorito (por cuenta + tema + mensaje
+// de Telegram), para el apartado de "Favoritos" del selector de contenido.
+model ContentFavorite {
+  id        String   @id @default(cuid())
+  accountId String
+  account   Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  topicId   String   // id del tema del grupo de contenido al que pertenece
+  messageId String   // id del mensaje de Telegram (raiz del album si aplica)
+  createdAt DateTime @default(now())
+
+  @@unique([accountId, messageId])
+}
+
+// Nota interna (solo la ve el equipo, nunca el fan) sobre un contenido
+// concreto de la bóveda: un resumen de lo que se ve/dice en la foto, vídeo o
+// audio, para no tener que reproducirlo entero cada vez para saber qué es.
+model ContentNote {
+  id        String   @id @default(cuid())
+  accountId String
+  account   Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  messageId String   // id del mensaje de Telegram (raiz del album si aplica)
+  note      String   @default("")
+  updatedAt DateTime @updatedAt
+
+  @@unique([accountId, messageId])
+}
+
+// Registro de que un mensaje enviado a un fan concreto vino "de la bóveda"
+// (contenido de la modelo, enviado normal o "ver una vez"). Sirve solo para
+// poder marcar esos medios con la etiqueta "GRUPO" dentro de la Galería del
+// chat; no guarda el contenido en si, solo el id del mensaje resultante.
+model ContentSendLog {
+  id                String   @id @default(cuid())
+  accountId         String
+  account           Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  chatId            String   // chat del fan al que se envio
+  telegramMessageId String   // id del mensaje ya en el chat del fan
+  createdAt         DateTime @default(now())
+
+  @@unique([accountId, chatId, telegramMessageId])
+  @@index([accountId, chatId])
+}
+
+// Grupo restringido (solo modelo + un cliente concreto, con "restringir
+// guardar contenido" activado en Telegram) para servicios de pago que no se
+// pueden hacer desde el chat privado normal. Uno por cuenta + fan.
+model ClientRestrictedGroup {
+  id          String   @id @default(cuid())
+  accountId   String
+  account     Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  chatId      String   // chat privado del fan (1:1) al que pertenece este grupo
+  groupChatId String   // id de Telegram del grupo restringido ya creado
+  groupTitle  String?
+  createdAt   DateTime @default(now())
+
+  @@unique([accountId, chatId])
+}
+
+// "Eliminar chat" (menú ⋮ de Mensajes/Mensajes Pro): solo el admin puede
+// hacerlo, y esconde ese chat de la lista de Mensajes para TODO el equipo
+// (chatters y el propio admin), aunque la conversación real de Telegram
+// sigue intacta - no se borra nada del lado de Telegram, es solo un filtro
+// del CRM (ver GET /api/accounts/:id/dialogs en messages.ts).
+model HiddenDialog {
+  id        String   @id @default(cuid())
+  accountId String
+  account   Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  chatId    String
+  hiddenBy  String? // nombre de quien lo eliminó, solo informativo
+  createdAt DateTime @default(now())
+
+  @@unique([accountId, chatId])
+}
+
+// Canal de Telegram (con solicitud de union) de una creadora, para el
+// apartado "Canales free": aqui se listan las solicitudes pendientes de ese
+// canal y se pueden aceptar/rechazar sin salir del panel.
+model FreeChannel {
+  id        String   @id @default(cuid())
+  accountId String
+  account   Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  chatId    String   // id de Telegram del canal
+  title     String
+  createdAt DateTime @default(now())
+
+  @@unique([accountId, chatId])
+}
+
+// "Scripts": mensajes guardados para insertar rapido en la conversacion con
+// un fan (respuestas frecuentes, precios, guiones de venta...), por cuenta.
+model Script {
+  id        String   @id @default(cuid())
+  accountId String
+  account   Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  title     String
+  content   String
+  // Emoji premium (custom emoji animados de Telegram) que tenga el texto,
+  // copiados tal cual desde un mensaje de la bóveda de contenido: JSON de
+  // [{offset, length, documentId}] en las mismas posiciones (indices UTF-16)
+  // que en "content". Null/vacio si el script no tiene ninguno.
+  entitiesJson String?
+  position  Int      @default(0) // orden de aparicion
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// "Guiones" (apartado propio, no confundir con Script de arriba, que es el
+// botón rápido «Scripts» del chat): guion de venta paso a paso, con precio
+// orientativo, organizado en categorías (ej. "SEXTING CAMA"). Cada paso es
+// texto (tal como lo escribiría la modelo, con opción de letras premium),
+// un pack de fotos/vídeos o un audio - se guardan todos juntos como JSON en
+// stepsJson porque el orden y la mezcla de tipos son lo que importa, no
+// hace falta una tabla aparte por paso.
+model ScriptCategory {
+  id        String   @id @default(cuid())
+  accountId String
+  account   Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  name      String
+  position  Int      @default(0)
+  createdAt DateTime @default(now())
+
+  guionScripts GuionScript[]
+}
+
+model GuionScript {
+  id         String          @id @default(cuid())
+  accountId  String
+  account    Account         @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  categoryId String?
+  category   ScriptCategory? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  name       String
+  price      Float?
+  // JSON: [{type:"text",text,premiumLetters}|{type:"pack",note}|{type:"audio",note}]
+  stepsJson  String          @default("[]")
+  position   Int             @default(0)
+  createdAt  DateTime        @default(now())
+  updatedAt  DateTime        @updatedAt
+}
+
+// Ajustes generales de TODA la agencia (una unica fila), tal y como se ven
+// en Configuración → General → "Toda la agencia" del panel de referencia:
+// listas de servicios/métodos de pago al apuntar una venta, verificación de
+// ventas y la etiqueta de "comprador reciente".
+model AgencySettings {
+  // Antes era una fila única de verdad ("singleton"). Con multi-agencia hay
+  // una fila POR AGENCIA - la fila que ya existía se queda con id
+  // "singleton" (no se toca), y las agencias nuevas usan un id normal
+  // (cuid()) - lo que de verdad identifica a QUIÉN pertenece cada fila desde
+  // ahora es agencyId, no id (ver agencyId más abajo). Todo el código
+  // busca/crea por agencyId, nunca ya por "el id singleton".
+  id                   String   @id @default(cuid())
+  // Sin relación de Prisma a propósito, mismo motivo que Account.agencyId/
+  // Worker.agencyId (ver comentario allí): evita el problema de arranque de
+  // `prisma db push` con la fila Agency "legacy-agency" todavía sin existir.
+  agencyId             String   @unique @default("legacy-agency")
+  services             String   @default("[]") // JSON string[] — chips de "Servicio" al apuntar una venta
+  paymentMethods       String   @default("[]") // JSON string[] — chips de "Método de pago" al apuntar una venta
+  saleVerificationMode String   @default("disabled") // "disabled" | "connected_only" | "all"
+  recentBuyerEnabled   Boolean  @default(true)
+  recentBuyerMode      String   @default("each") // "each" (cada compra) | "first" (solo la primera)
+  recentBuyerDays      Int      @default(7)
+  shadowModeEnabled    Boolean  @default(false) // "Modo shadow": invisible en Telegram (sin online), solo admin lo activa
+  // Migración única (una sola vez, para siempre): antes un trabajador con
+  // rol "admin" (Team líder) veía TODAS las cuentas en Mensajes/Mensajes
+  // Pro/SFS sin necesitar ningún WorkerPermission concedido a mano -al
+  // pasar a exigirle permiso explícito por cuenta, igual que a un Chatter-,
+  // esta bandera marca que ya se le concedió sin más trámite acceso a
+  // mensajes+mensajes-pro+sfs en TODAS las cuentas que ya existían en ese
+  // momento, para no dejar a ningún Team líder ya en activo sin acceso de
+  // golpe. Solo se ejecuta si esto está en false; una vez hecho, cuentas
+  // NUEVAS ya no se conceden solas - hay que dárselas a mano, como a un
+  // Chatter.
+  teamLeadFullAccessMigrated Boolean @default(false)
+  updatedAt            DateTime @updatedAt
 }
 
 model SourceGroup {
@@ -145,6 +984,12 @@ model CampaignDestination {
   chatId      String   // id de Telegram del grupo/canal destino
   chatTitle   String
   topicId     Int?     // si el destino es un foro con temas
+  // "Seleccionar grupos a los que NO enviar": este destino sigue formando
+  // parte de la carpeta/campaña (no hay que volver a añadirlo si se
+  // cambia de opinión), pero randomEngine/fixedEngine lo saltan al enviar.
+  // Distinto de borrar el destino del todo (@@unique de abajo, boton
+  // "Quitar" en el panel), que lo elimina para siempre.
+  excluded    Boolean  @default(false)
 
   @@unique([campaignId, chatId, topicId])
 }
@@ -165,7 +1010,7 @@ model ScheduleSlot {
 }
 
 // Un registro por slot y por dia (fecha en la timezone de la cuenta): evita
-// que el mismo horario se procese dos veces y permite distinguir
+// que el mismo horario se procese dos veces y es lo que permite distinguir
 // "ya enviado hoy" de "hoy tocaba y no se ha enviado todavia".
 model ScheduleSlotRun {
   id             String       @id @default(cuid())
@@ -178,6 +1023,106 @@ model ScheduleSlotRun {
   createdAt DateTime @default(now())
 
   @@unique([scheduleSlotId, runDate])
+}
+
+// ---------- Detector de pagos ----------
+// Vigila los mensajes (del fan Y del equipo) de todas las cuentas buscando
+// datos de pago (IBAN, PayPal, Bizum, cripto, enlaces de Stripe/Revolut...),
+// avisa por WhatsApp (reutiliza notifyWhatsAppTo/Twilio de arriba) y guarda
+// un historial. "Nuestros métodos de pago" y los filtros de texto sirven
+// para que NO avise de los datos propios de la agencia (los que sí se
+// quieren mandar a los fans).
+
+// Una regla = un patrón (regex) que, si aparece en un mensaje, se guarda en
+// el historial y (si hay WhatsApp configurado en esa cuenta) avisa.
+model PaymentRule {
+  id             String   @id @default(cuid())
+  // Sin relación de Prisma a propósito, mismo motivo que Account.agencyId.
+  agencyId       String   @default("legacy-agency")
+  name           String
+  pattern        String   // regex (sin delimitadores), insensible a mayúsculas
+  searchText     Boolean  @default(true)  // mensajes de texto normales
+  searchCaption  Boolean  @default(true)  // pie de foto/vídeo/archivo
+  searchFilename Boolean  @default(true)  // nombre del archivo adjunto
+  active         Boolean  @default(true)
+  edited         Boolean  @default(false) // se tocó el patrón de fábrica
+  position       Int      @default(0)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  events PaymentDetectionEvent[]
+}
+
+// Filtro de texto: datos de pago PROPIOS de la agencia (nuestro PayPal,
+// nuestro IBAN...). Si un mensaje coincide con una regla PERO también con
+// un filtro de texto activo, se guarda en el historial como "silenciado"
+// (no avisa) en vez de descartarse sin más - así se puede revisar qué se
+// está silenciando.
+model PaymentTextFilter {
+  id         String   @id @default(cuid())
+  // Sin relación de Prisma a propósito, mismo motivo que Account.agencyId.
+  agencyId   String   @default("legacy-agency")
+  name       String
+  pattern    String   // texto/fragmento literal (no regex) a reconocer como "nuestro"
+  active     Boolean  @default(true)
+  edited     Boolean  @default(false)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+}
+
+// "Nuestros métodos de pago": un único bloque de texto libre (una fila,
+// singleton) con los datos de pago de la agencia pegados tal cual - lo que
+// contenga aquí nunca avisa, igual que un filtro de texto pero sin tener
+// que dar de alta una regla por cada línea.
+model PaymentOwnMethods {
+  // Antes era una fila única de verdad ("singleton"). Con multi-agencia hay
+  // una fila POR AGENCIA - la fila que ya existía se queda con id
+  // "singleton" (no se toca), y las agencias nuevas usan un id normal
+  // (cuid()) - lo que de verdad identifica a QUIÉN pertenece cada fila desde
+  // ahora es agencyId, no id (mismo patrón que AgencySettings).
+  id        String   @id @default(cuid())
+  // Sin relación de Prisma a propósito, mismo motivo que Account.agencyId.
+  agencyId  String   @unique @default("legacy-agency")
+  text      String   @default("")
+  updatedAt DateTime @updatedAt
+}
+
+// Chat silenciado del todo para el Detector de pagos: ni guarda ni avisa
+// aunque una regla coincida (a diferencia de un filtro de texto, que sigue
+// guardando pero como "silenciado"). Uno por cuenta + chat de Telegram.
+model PaymentMutedChat {
+  id        String   @id @default(cuid())
+  accountId String
+  account   Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  chatId    String
+  chatTitle String?
+  createdAt DateTime @default(now())
+
+  @@unique([accountId, chatId])
+}
+
+// Un aviso guardado en el Historial: qué regla saltó, en qué mensaje/chat,
+// y si se llegó a avisar por WhatsApp o se quedó "silenciado" por un
+// filtro de texto (ver arriba).
+model PaymentDetectionEvent {
+  id           String      @id @default(cuid())
+  accountId    String
+  account      Account     @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  chatId       String
+  chatTitle    String?     // nombre del fan/chat en el momento del aviso
+  senderOut    Boolean     @default(false) // true = lo escribió el equipo, false = el fan
+  messageText  String      @default("")
+  ruleId       String?
+  rule         PaymentRule? @relation(fields: [ruleId], references: [id], onDelete: SetNull)
+  ruleName     String      // copia del nombre por si se borra/renombra la regla despues
+  matchedText  String      // el fragmento concreto que hizo saltar la regla
+  silenced     Boolean     @default(false) // coincidió también con un filtro de texto/métodos propios
+  whatsappSent Boolean     @default(false)
+  dismissed    Boolean     @default(false) // se le dio a la "×" de la fila (se oculta, no se borra)
+  createdAt    DateTime    @default(now())
+
+  @@index([accountId, createdAt])
+  @@index([createdAt])
 }
 
 model SendLog {
@@ -197,4 +1142,197 @@ model SendLog {
 
   @@index([accountId, createdAt])
   @@index([campaignId, createdAt])
+}
+
+// "Programar posts → Canales": un post (foto/vídeo/álbum de la bóveda +
+// texto opcional) que se publica solo, una vez, a un canal/grupo concreto
+// en la fecha/hora elegida. Distinto del Reenviador (que repite un ritmo o
+// unos horarios FIJOS todos los días con contenido rotativo): aqui cada
+// fila es un envio suelto y unico, como "Programar posts" del panel de
+// referencia.
+model ScheduledPost {
+  id        String            @id @default(cuid())
+  accountId String
+  account   Account           @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  kind      ScheduledPostKind @default(CHANNEL)
+
+  // Solo para kind=CHANNEL: chatId/titulo del canal o grupo destino. Para
+  // kind=STORY se dejan fijos como "me"/"Historia (mi perfil)" - una
+  // Historia no tiene "destino", va siempre al propio perfil.
+  destinationChatId String
+  destinationTitle  String
+
+  // Contenido: ids de mensajes de la bóveda de esta cuenta (accountId +
+  // account.contentGroupChatId), como JSON string[]. Para CHANNEL puede ser
+  // un album completo (varias fotos/videos); para STORY siempre 1 solo
+  // (Telegram no permite "albumes" de Historias). Reenvio "sin autor" en
+  // CHANNEL; en STORY se descarga y se vuelve a subir como Historia nueva.
+  messageIds String
+
+  // Texto que se ve en la tabla ("TEXTO"): copia del caption original del
+  // contenido elegido, solo para mostrar - el envio real reenvia el
+  // contenido tal cual (con su caption original incluido).
+  previewText String @default("")
+
+  // Solo para kind=STORY:
+  storyPrivacy      StoryPrivacy @default(EVERYONE)
+  storyPeriodHours   Int         @default(24) // 6/12/24/48 (6/12/48 solo con Premium; Telegram lo valida)
+  storyPinned        Boolean     @default(false) // se queda fijada en el perfil ademas de expirar
+  telegramStoryId    Int?        // id de la Historia ya publicada en Telegram (para poder borrarla despues)
+
+  scheduledFor DateTime // fecha/hora exacta (UTC) en la que debe publicarse
+  status       ScheduledPostStatus @default(PENDING)
+  sentAt       DateTime?
+  errorMessage String?
+
+  createdAt DateTime @default(now())
+
+  @@index([accountId, status, scheduledFor])
+}
+
+// ---------- Grupos de promoción ----------
+// "Admins" AJENOS a la agencia: personas/agencias externas a las que se
+// paga por promocionar en sus grupos/canales de Telegram (nada que ver con
+// Configuración → Equipo, ver Worker). Se catalogan los grupos/canales
+// reales de cada creadora, se le asigna un admin a cada uno, y se calcula
+// cuánto genera cada admin (ingresos de los fans que llegaron por sus
+// grupos) frente a lo que cuesta (precio mensual x meses x creadoras en las
+// que tiene grupos) - igual que "Grupos de promoción" del panel de
+// referencia.
+
+model PromoAdmin {
+  id        String   @id @default(cuid())
+  // Sin relación de Prisma a propósito, mismo motivo que Account.agencyId.
+  agencyId  String   @default("legacy-agency")
+  name      String
+  comment   String   @default("") // nota libre del dueño sobre este admin, columna "Comentario" del veredicto
+  createdAt DateTime @default(now())
+
+  prices PromoAdminPrice[]
+  groups PromoGroup[]
+
+  @@unique([agencyId, name])
+}
+
+// Precio que cobra un admin al mes. accountId=null es el precio "General"
+// (el que se usa para las creadoras que no tengan uno propio cargado).
+// priceMonthly null = "sin cargar": esa creadora no suma coste y el admin
+// no puede tener veredicto todavía para ella (ver informes.ts).
+model PromoAdminPrice {
+  id           String     @id @default(cuid())
+  promoAdminId String
+  promoAdmin   PromoAdmin @relation(fields: [promoAdminId], references: [id], onDelete: Cascade)
+  accountId    String? // null = "General"
+  account      Account?   @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  priceMonthly Float?
+
+  @@unique([promoAdminId, accountId])
+}
+
+// Catálogo de grupos/canales REALES de Telegram (leídos en vivo, ver
+// telegram/promoGroups.ts), identificados por su chatId - antes GLOBAL, no
+// por cuenta: el mismo grupo puede tener dentro a varias creadoras a la vez
+// (ver PromoGroupAccount), así que se cataloga una sola vez aunque "Leer
+// grupos" se pulse para varias cuentas DE LA MISMA agencia. Con
+// multi-agencia el catálogo pasa a ser por agencia (agencyId+chatId, ya no
+// chatId a secas): el mismo grupo de Telegram podría tener creadoras de DOS
+// agencias distintas dentro a la vez, cada una con su propio admin/precio
+// asignado, y esas asignaciones son justo lo que no se puede compartir.
+model PromoGroup {
+  id           String      @id @default(cuid())
+  // Sin relación de Prisma a propósito, mismo motivo que Account.agencyId.
+  agencyId     String      @default("legacy-agency")
+  chatId       String
+  title        String
+  isChannel    Boolean     @default(false)
+  memberCount  Int         @default(0)
+  promoAdminId String?
+  promoAdmin   PromoAdmin? @relation(fields: [promoAdminId], references: [id], onDelete: SetNull)
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+
+  accounts     PromoGroupAccount[]
+  attributions PromoGroupFanAttribution[]
+
+  @@unique([agencyId, chatId])
+}
+
+// Qué creadoras (cuentas) están dentro de este grupo - se rellena/actualiza
+// cada vez que se pulsa "Leer grupos de esta creadora" / "Leer las N
+// creadoras".
+model PromoGroupAccount {
+  id           String     @id @default(cuid())
+  promoGroupId String
+  promoGroup   PromoGroup @relation(fields: [promoGroupId], references: [id], onDelete: Cascade)
+  accountId    String
+  account      Account    @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@unique([promoGroupId, accountId])
+}
+
+// A qué grupo(s) de promoción se atribuye un fan: se guarda la PRIMERA vez
+// que se detecta un fan nuevo escribiendo a una cuenta (ver messages.ts),
+// comprobando en Telegram si es miembro de alguno de los grupos ya
+// catalogados de esa cuenta (channels.getParticipant, sin descargar la
+// lista completa de miembros - por rendimiento). Un fan puede estar en
+// varios grupos a la vez (por eso es una tabla aparte y no un campo en
+// FanNote): el ingreso de sus ventas se reparte entre todos ellos, como en
+// el panel de referencia ("el monto de cada venta se reparte entre los
+// grupos en común del fan").
+model PromoGroupFanAttribution {
+  id             String     @id @default(cuid())
+  accountId      String
+  account        Account    @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  chatId         String // id de Telegram del fan
+  promoGroupId   String
+  promoGroup     PromoGroup @relation(fields: [promoGroupId], references: [id], onDelete: Cascade)
+  firstContactAt DateTime   @default(now())
+
+  @@unique([accountId, chatId, promoGroupId])
+  @@index([accountId, chatId])
+}
+
+// ---------- SFS ----------
+// "SFS" (shoutout for shoutout): reutiliza los MISMOS chats de Telegram que
+// "Mensajes" (misma cuenta, mismo chatId), pero con notas propias para este
+// apartado en vez de las notas de fan de siempre - un mismo chat puede tener
+// nota de fan Y nota de SFS a la vez, son independientes.
+model SfsNote {
+  id        String   @id @default(cuid())
+  accountId String
+  account   Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  chatId    String
+  note      String   @default("")
+  updatedAt DateTime @updatedAt
+
+  @@unique([accountId, chatId])
+}
+
+// Pedido realizado a través de la integración de Just Another Panel (panel
+// SMM estándar: mismo esquema de API que la mayoría de estos paneles) desde
+// el propio CRM. Guardamos una copia local del pedido para tener historial
+// aunque cambie el estado en el panel, y para poder refrescarlo a mano.
+model JapOrder {
+  id           String   @id @default(cuid())
+  // Sin relación de Prisma a propósito, mismo motivo que Account.agencyId.
+  // OJO: el saldo/API de JAP en sí sigue siendo UNA sola cuenta compartida
+  // (JAP_API_KEY de Railway, ver utils/japClient.ts) - esto solo separa el
+  // HISTORIAL de pedidos que ve cada agencia, no el dinero real gastado.
+  agencyId     String   @default("legacy-agency")
+  accountId    String?
+  account      Account? @relation(fields: [accountId], references: [id], onDelete: SetNull)
+  japOrderId   String   // id que devuelve Just Another Panel ("order")
+  serviceId    Int
+  serviceName  String   @default("")
+  link         String
+  quantity     Int
+  charge       String?  // coste que informa el panel (texto, viene con su propia moneda)
+  currency     String?
+  status       String   @default("Pending") // ultimo estado conocido (Pending/In progress/Completed/Partial/Canceled...)
+  startCount   String?
+  remains      String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([accountId])
 }
