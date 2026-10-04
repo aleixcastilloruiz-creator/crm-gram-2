@@ -164,11 +164,9 @@ model ScheduleSlot {
   @@unique([campaignId, timeOfDay])
 }
 
-/**
- * Un registro por slot y por dia (fecha en la timezone de la cuenta): evita
- * que el mismo horario se procese dos veces y es lo que permite distinguir
- * "ya enviado hoy" de "hoy tocaba y no se ha enviado todavia".
- */
+// Un registro por slot y por dia (fecha en la timezone de la cuenta): evita
+// que el mismo horario se procese dos veces y permite distinguir
+// "ya enviado hoy" de "hoy tocaba y no se ha enviado todavia".
 model ScheduleSlotRun {
   id             String       @id @default(cuid())
   scheduleSlotId String
