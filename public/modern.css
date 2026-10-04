@@ -1,0 +1,26 @@
+/* LUXE CRM — visual layer rebuilt from scratch.
+   The functional app.js remains untouched so every existing module/API flow
+   keeps working while the interface gets a new visual system. */
+:root{
+  --green-950:#06110f;--green-900:#0a1815;--green-850:#0e211c;--green-800:#122a23;
+  --gold-400:#f2d59a;--gold-500:#d7b66f;--gold-600:#a98545;--cream:#f7f4ed;
+  --cream-dim:#b9c1ba;--cream-faint:#74817a;--red:#f07167;--green-ok:#65d19a;
+  --amber:#e9bd5e;--radius:16px;--sidebar-w:248px;--accountlist-w:224px;
+}
+html{background:#06110f}body{background:radial-gradient(900px 600px at 15% -10%,rgba(215,182,111,.10),transparent 55%),#06110f;color:var(--cream);font-size:14px}
+.sidebar{width:var(--sidebar-w);background:rgba(8,22,18,.96);border-right:1px solid rgba(242,213,154,.10);padding:20px 14px;backdrop-filter:blur(18px)}
+.brand{padding:8px 10px 24px}.brand-title{font-size:12px;letter-spacing:.11em;color:var(--gold-400)}
+.nav-item{padding:10px 12px;border-radius:11px;color:#aeb8b1;transition:.16s}.nav-item:hover{background:rgba(242,213,154,.07);color:#eee}.nav-item.active{background:linear-gradient(90deg,rgba(215,182,111,.17),rgba(215,182,111,.06));color:var(--gold-400);box-shadow:inset 3px 0 var(--gold-500)}
+.workspace{background:transparent}.reenviador-layout{min-height:100vh}.account-list{width:var(--accountlist-w);padding:26px 14px;background:rgba(7,19,16,.42);border-right:1px solid rgba(242,213,154,.08)}
+.account-list-title{font-size:10px;font-weight:700;letter-spacing:.12em;color:#68756e}.account-item{padding:11px;border-radius:12px}.account-item.active{background:rgba(215,182,111,.12);border:1px solid rgba(215,182,111,.14)}
+.account-avatar{width:34px;height:34px}.account-name{font-size:13px}.status-dot{box-shadow:0 0 0 3px rgba(255,255,255,.025)}
+main#app{max-width:none;padding:34px 40px 70px}h1{font-size:25px;letter-spacing:-.02em;color:#f4e5bf}h2{font-size:16px;color:#ead7a9}.subtitle{color:#8f9d95}
+.card,.banner{background:linear-gradient(145deg,rgba(20,43,35,.86),rgba(10,25,21,.90));border:1px solid rgba(242,213,154,.11);border-radius:var(--radius);box-shadow:0 12px 40px rgba(0,0,0,.18)}
+.card{padding:20px 22px}.banner{padding:15px 18px}.section-title-row{margin-bottom:18px!important}
+button,.btn{border-radius:10px!important;border:1px solid rgba(242,213,154,.14)!important;background:#152c24!important;color:#f4f0e8!important;transition:.15s!important;box-shadow:none!important}button:hover,.btn:hover{transform:translateY(-1px);border-color:rgba(242,213,154,.32)!important;background:#1b382e!important}button.primary,.btn.primary,.button-primary{background:linear-gradient(135deg,#d7b66f,#a98545)!important;color:#09110e!important;border-color:transparent!important;font-weight:700}
+input,select,textarea{background:#081713!important;border:1px solid rgba(242,213,154,.13)!important;color:#f4f1e9!important;border-radius:10px!important;outline:none!important}input:focus,select:focus,textarea:focus{border-color:rgba(215,182,111,.55)!important;box-shadow:0 0 0 3px rgba(215,182,111,.08)!important}
+table{border-collapse:separate!important;border-spacing:0!important;overflow:hidden;border-radius:12px}th{background:#10271f!important;color:#cbbd9d!important}td{border-color:rgba(255,255,255,.05)!important}tr:hover td{background:rgba(215,182,111,.035)!important}
+.toast{border-radius:12px!important;background:#17362b!important;border:1px solid rgba(215,182,111,.25)!important;box-shadow:0 15px 50px #0008!important}
+.mobile-topbar{background:#081713!important;border-bottom:1px solid rgba(242,213,154,.1)!important}
+@media(max-width:900px){:root{--sidebar-w:0px;--accountlist-w:190px}main#app{padding:24px 18px 50px}.sidebar{width:0;padding:0;border:0;overflow:hidden}.sidebar.sidebar-mobile-open{width:248px;padding:20px 14px}.account-list{width:190px}}
+@media(max-width:640px){.reenviador-layout{display:block}.account-list{width:100%;border-right:0;border-bottom:1px solid rgba(242,213,154,.08);padding:12px}.account-list .account-item{display:inline-flex;margin-right:4px}.account-list-title{display:none}main#app{padding:20px 14px 44px}}

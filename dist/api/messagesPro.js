@@ -18,16 +18,41 @@ const auth_1 = require("../utils/auth");
 async function registerMessagesProRoutes(app) {
     app.get("/api/mensajes-pro/accounts", async (request) => {
         const worker = await (0, auth_1.getWorkerFromRequest)(request);
-        if (worker && worker.role !== "admin") {
-            const permissions = await prisma_1.prisma.workerPermission.findMany({
+        if (worker) {
+            let permissions = await prisma_1.prisma.workerPermission.findMany({
                 where: { workerId: worker.id, section: "mensajes-pro" },
                 include: { account: { select: { id: true, label: true } } },
             });
+            // Auto-reparación: "mensajes-pro" siempre se concede a la vez que
+            // "mensajes" (ver Configuración → Equipo → Permisos, se marcan las
+            // tres secciones juntas al guardar), así que si a este trabajador le
+            // falta "mensajes-pro" en alguna cuenta donde SÍ tiene "mensajes", es
+            // un desajuste de datos de algún guardado antiguo/a medias - nunca
+            // debería negarle el acceso a Mensajes Pro por eso. Se completa solo,
+            // una vez, en vez de devolver "sin acceso" y obligar a la agencia a
+            // adivinar por qué "Guardar permisos" no bastó.
+            const mensajesPerms = await prisma_1.prisma.workerPermission.findMany({
+                where: { workerId: worker.id, section: "mensajes" },
+                select: { accountId: true },
+            });
+            const withProAlready = new Set(permissions.map((p) => p.accountId));
+            const missingAccountIds = mensajesPerms.map((p) => p.accountId).filter((id) => !withProAlready.has(id));
+            if (missingAccountIds.length > 0) {
+                await prisma_1.prisma.workerPermission.createMany({
+                    data: missingAccountIds.map((accountId) => ({ workerId: worker.id, accountId, section: "mensajes-pro" })),
+                    skipDuplicates: true,
+                });
+                permissions = await prisma_1.prisma.workerPermission.findMany({
+                    where: { workerId: worker.id, section: "mensajes-pro" },
+                    include: { account: { select: { id: true, label: true } } },
+                });
+            }
             const accounts = permissions.map((p) => ({ id: p.account.id, label: p.account.label }));
             return { accounts };
         }
-        // Sin cookie de trabajador (el dueño con Basic Auth) o admin del
-        // equipo: ve todas las cuentas, igual que en el resto del panel.
+        // Sin cookie de trabajador (el dueño/jefe con Basic Auth): ve todas las
+        // cuentas, igual que en el resto del panel. Un Team líder ya NO entra
+        // por aquí - tiene el mismo perfil que un Chatter en Mensajes Pro.
         const accounts = await prisma_1.prisma.account.findMany({
             orderBy: { createdAt: "asc" },
             select: { id: true, label: true },

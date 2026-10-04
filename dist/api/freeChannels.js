@@ -5,6 +5,7 @@ const telegram_1 = require("telegram");
 const prisma_1 = require("../utils/prisma");
 const connectionPool_1 = require("../telegram/connectionPool");
 const dialogs_1 = require("../telegram/dialogs");
+const mediaCache_1 = require("../telegram/mediaCache");
 /**
  * "Canales free" (Configuración → Modelos → esta creadora, y el apartado
  * propio de "Canales free" del menú lateral): canales de Telegram con
@@ -62,7 +63,11 @@ async function registerFreeChannelRoutes(app) {
         const account = await prisma_1.prisma.account.findUniqueOrThrow({ where: { id } });
         try {
             const client = await (0, connectionPool_1.getAccountClient)(account);
-            const results = await (0, dialogs_1.searchGroupDialogs)(client, q.q);
+            // ownedOnly=true: solo grupos/canales que la propia cuenta ha creado
+            // (de los que es dueña), nunca uno donde solo es miembro o admin -
+            // esta lista es para "Canales free", donde hace falta poder aprobar
+            // solicitudes de union, así que un canal ajeno no serviría de nada.
+            const results = await (0, dialogs_1.searchGroupDialogs)(client, q.q, true);
             return { results };
         }
         catch (err) {
@@ -92,8 +97,15 @@ async function registerFreeChannelRoutes(app) {
         return { ok: true };
     });
     // --- Solicitudes de union pendientes de un canal ---
+    // Telegram solo da hasta 200 por llamada (GetChatInviteImporters), asi que
+    // con canales de miles de solicitudes (ver "Mery Sweetie" con 1061 en el
+    // panel de referencia) hacia falta paginar: offsetDate/offsetUserId son
+    // los del ULTIMO importer de la pagina anterior (Telegram sigue desde
+    // ahi), y hasMore avisa al frontend de si hay que pedir la siguiente
+    // pagina ("Cargar más") en vez de dar por hecho que eso es todo.
     app.get("/api/accounts/:id/free-channels/:channelId/join-requests", async (request, reply) => {
         const { id, channelId } = request.params;
+        const q = request.query;
         const account = await prisma_1.prisma.account.findUniqueOrThrow({ where: { id } });
         const channel = await prisma_1.prisma.freeChannel.findUnique({ where: { id: channelId } });
         if (!channel || channel.accountId !== id)
@@ -102,9 +114,18 @@ async function registerFreeChannelRoutes(app) {
             const client = await (0, connectionPool_1.getAccountClient)(account);
             const entity = await (0, dialogs_1.resolveEntityById)(client, channel.chatId);
             const peer = await client.getInputEntity(entity);
-            const result = await client.invoke(new telegram_1.Api.messages.GetChatInviteImporters({ peer, requested: true, limit: 200 }));
+            const result = await client.invoke(new telegram_1.Api.messages.GetChatInviteImporters({
+                peer,
+                requested: true,
+                limit: 200,
+                offsetDate: q.offsetDate ? Number(q.offsetDate) : 0,
+                offsetUser: q.offsetUserId
+                    ? await client.getInputEntity(q.offsetUserId).catch(() => new telegram_1.Api.InputUserEmpty())
+                    : new telegram_1.Api.InputUserEmpty(),
+            }));
             const usersById = new Map((result.users || []).map((u) => [String(u.id), u]));
-            const requests = (result.importers || []).map((imp) => {
+            const importers = result.importers || [];
+            const requests = importers.map((imp) => {
                 const u = usersById.get(String(imp.userId));
                 return {
                     userId: String(imp.userId),
@@ -115,11 +136,51 @@ async function registerFreeChannelRoutes(app) {
                     about: imp.about || null,
                 };
             });
-            return { requests, total: result.count ?? requests.length };
+            const last = importers[importers.length - 1];
+            return {
+                requests,
+                total: result.count ?? requests.length,
+                hasMore: importers.length >= 200,
+                nextOffsetDate: last?.date ?? null,
+                nextOffsetUserId: last ? String(last.userId) : null,
+            };
         }
         catch (err) {
             request.log.error(err);
             return reply.code(502).send({ error: err?.errorMessage || err?.message || "No se pudieron leer las solicitudes de este canal." });
+        }
+    });
+    // Foto de perfil de quien ha solicitado unirse, para pintar el avatar real
+    // en la lista de solicitudes (en vez de solo iniciales). userId+accessHash
+    // vienen tal cual los dio /join-requests - no hace falta que el fan esté en
+    // los dialogos de la cuenta, un InputUser con su accessHash es suficiente
+    // para pedirle la foto a Telegram. 404 si no tiene foto puesta.
+    app.get("/api/accounts/:id/free-channels/requester-avatar", async (request, reply) => {
+        const { id } = request.params;
+        const q = request.query;
+        if (!q.userId || !q.accessHash)
+            return reply.code(400).send();
+        const cacheKey = `avatar:${id}:req:${q.userId}`;
+        const cached = (0, mediaCache_1.getCachedMedia)(cacheKey);
+        if (cached) {
+            reply.header("Content-Type", "image/jpeg");
+            reply.header("Cache-Control", "private, max-age=1800");
+            return reply.send(cached);
+        }
+        const account = await prisma_1.prisma.account.findUniqueOrThrow({ where: { id } });
+        try {
+            const client = await (0, connectionPool_1.getAccountClient)(account);
+            const inputUser = new telegram_1.Api.InputUser({ userId: q.userId, accessHash: q.accessHash });
+            const buf = (await client.downloadProfilePhoto(inputUser, { isBig: false }));
+            if (!buf || buf.length === 0)
+                return reply.code(404).send();
+            (0, mediaCache_1.setCachedMedia)(cacheKey, buf);
+            reply.header("Content-Type", "image/jpeg");
+            reply.header("Cache-Control", "private, max-age=1800");
+            return reply.send(buf);
+        }
+        catch (err) {
+            return reply.code(404).send();
         }
     });
     // Aceptar/rechazar UNA solicitud concreta.
@@ -181,6 +242,41 @@ async function registerFreeChannelRoutes(app) {
         catch (err) {
             request.log.error(err);
             return reply.code(502).send({ error: err?.errorMessage || err?.message || "No se pudieron aceptar las solicitudes." });
+        }
+    });
+    // Rechazar en bloque: mismo patron que accept-all pero con approved:false.
+    app.post("/api/accounts/:id/free-channels/:channelId/join-requests/reject-all", async (request, reply) => {
+        const { id, channelId } = request.params;
+        const account = await prisma_1.prisma.account.findUniqueOrThrow({ where: { id } });
+        const channel = await prisma_1.prisma.freeChannel.findUnique({ where: { id: channelId } });
+        if (!channel || channel.accountId !== id)
+            return reply.code(404).send({ error: "Canal no encontrado" });
+        try {
+            const client = await (0, connectionPool_1.getAccountClient)(account);
+            const entity = await (0, dialogs_1.resolveEntityById)(client, channel.chatId);
+            const peer = await client.getInputEntity(entity);
+            const result = await client.invoke(new telegram_1.Api.messages.GetChatInviteImporters({ peer, requested: true, limit: 200 }));
+            const usersById = new Map((result.users || []).map((u) => [String(u.id), u]));
+            const importers = result.importers || [];
+            let rejected = 0;
+            for (const imp of importers) {
+                const u = usersById.get(String(imp.userId));
+                if (!u || u.accessHash === undefined)
+                    continue;
+                try {
+                    const inputUser = new telegram_1.Api.InputUser({ userId: u.id, accessHash: u.accessHash });
+                    await client.invoke(new telegram_1.Api.messages.HideChatJoinRequest({ peer, userId: inputUser, approved: false }));
+                    rejected++;
+                }
+                catch {
+                    // seguimos con el siguiente aunque uno falle
+                }
+            }
+            return { rejected, hasMore: importers.length >= 200 };
+        }
+        catch (err) {
+            request.log.error(err);
+            return reply.code(502).send({ error: err?.errorMessage || err?.message || "No se pudieron rechazar las solicitudes." });
         }
     });
 }

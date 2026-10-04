@@ -1,6 +1,10 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.MAX_FULL_MEDIA_BYTES = exports.withFullMediaSlot = void 0;
 exports.clearContentFullMediaCache = clearContentFullMediaCache;
+exports.getContentGroupEntity = getContentGroupEntity;
+exports.getContentMessage = getContentMessage;
+exports.mediaSizeBytes = mediaSizeBytes;
 exports.registerContentLibraryRoutes = registerContentLibraryRoutes;
 const telegram_1 = require("telegram");
 const uploads_1 = require("telegram/client/uploads");
@@ -57,14 +61,47 @@ function makeSlotLimiter(maxConcurrent) {
     };
 }
 // Miniaturas: pesan poco (unos KB), toleran mas paralelismo.
-const withThumbSlot = makeSlotLimiter(6);
+const withThumbSlot = makeSlotLimiter(10);
+// Algunos mensajes (documentos, stickers, contenido reenviado con
+// "no reenviar", etc.) nunca van a poder generar una miniatura: cada intento
+// hace 1-3 descargas a Telegram en serie antes de rendirse. Sin esto, cada
+// vez que se abre la bóveda se repiten esos intentos fallidos para los
+// mismos mensajes, lo cual es la parte más lenta de la rejilla. Guardamos
+// durante un rato corto qué mensajes fallaron para devolver 404 al instante
+// la próxima vez, en vez de repetir la descarga.
+// OJO: esto antes duraba 10 minutos, y un fallo TRANSITORIO (un FLOOD_WAIT
+// puntual, un corte de red al descargar) se guardaba igual que uno
+// permanente — así que una miniatura que fallara una vez por mala suerte se
+// quedaba rota (🖼️) durante los siguientes 10 minutos aunque se recargara la
+// página o se reabriera la carpeta. Bajarlo a un minuto es tiempo de sobra
+// para no martillear a Telegram con los mensajes que de verdad nunca van a
+// tener miniatura, sin castigar tanto rato a los que fallaron por algo
+// puntual.
+const FAILED_THUMB_TTL_MS = 60 * 1000;
+const failedThumbCache = new Map();
+function isRecentlyFailedThumb(key) {
+    const at = failedThumbCache.get(key);
+    if (at === undefined)
+        return false;
+    if (Date.now() - at > FAILED_THUMB_TTL_MS) {
+        failedThumbCache.delete(key);
+        return false;
+    }
+    return true;
+}
+function markFailedThumb(key) {
+    // Evita que este mapa crezca sin límite en un proceso de larga duración.
+    if (failedThumbCache.size > 2000)
+        failedThumbCache.clear();
+    failedThumbCache.set(key, Date.now());
+}
 // Archivo COMPLETO (vista grande / envío "ver una vez"): un vídeo puede
 // pesar decenas de MB, así que aquí somos mucho más estrictos para no
 // comernos la RAM del contenedor con varias descargas grandes a la vez.
-const withFullMediaSlot = makeSlotLimiter(2);
+exports.withFullMediaSlot = makeSlotLimiter(2);
 // Si el archivo es descomunal (mas de 60MB), mejor fallar con un mensaje
 // claro que arriesgarnos a que el proceso se quede sin memoria.
-const MAX_FULL_MEDIA_BYTES = 60 * 1024 * 1024;
+exports.MAX_FULL_MEDIA_BYTES = 60 * 1024 * 1024;
 // Cache pequeña y aparte (no la de miniaturas) para la vista grande: si
 // alguien reabre el mismo vídeo/foto en la misma sesión, la segunda vez es
 // instantánea. Pocas entradas y solo archivos no muy grandes, para no
@@ -115,7 +152,24 @@ async function getContentGroupEntity(client, accountId, chatId) {
     }
 }
 const topicsCache = new Map();
-const TOPICS_TTL_MS = 2 * 60 * 1000;
+const TOPICS_TTL_MS = 10 * 60 * 1000;
+const itemsCache = new Map();
+const ITEMS_TTL_MS = 45 * 1000;
+function getCachedItems(key) {
+    const entry = itemsCache.get(key);
+    if (!entry)
+        return null;
+    if (Date.now() - entry.loadedAt > ITEMS_TTL_MS) {
+        itemsCache.delete(key);
+        return null;
+    }
+    return entry.payload;
+}
+function setCachedItems(key, payload) {
+    if (itemsCache.size > 300)
+        itemsCache.clear();
+    itemsCache.set(key, { payload, loadedAt: Date.now() });
+}
 const messageCache = new Map();
 const MESSAGE_TTL_MS = 5 * 60 * 1000;
 function cacheMessage(accountId, message) {
@@ -178,30 +232,60 @@ function classifyMedia(media) {
  * ahi si funciona para fotos Y vídeos: pasarle el objeto de tamaño entero
  * (como se hacia antes) fallaba en silencio para vídeos/documentos y dejaba
  * la miniatura en blanco. */
+// GramJS a veces "tiene éxito" (no lanza excepción) pero devuelve un Buffer
+// vacío (0 bytes) — por ejemplo cuando el tamaño de miniatura pedido no
+// existe para ese mensaje en concreto. Un Buffer vacío sigue siendo un
+// objeto "truthy" en JS, así que sin este chequeo la respuesta HTTP salía
+// como 200 OK con el cuerpo vacío: el navegador la trataba como imagen rota
+// (por eso las miniaturas fallaban aunque la petición no diera error).
+function isUsableBuf(buf) {
+    return Buffer.isBuffer(buf) && buf.length > 0;
+}
 async function downloadContentThumb(client, message) {
+    const media = message.media;
+    // Intento preferente (sobre todo para VIDEOS): pedir el tamaño de
+    // miniatura mas grande DE VERDAD como OBJETO concreto de
+    // photo.sizes/document.thumbs, no como el indice numerico "-1"/"0" de
+    // abajo - igual que ya se explicaba en pickBestPhotoSize (escrita para
+    // esto, pero nunca se llegaba a usar aqui: por eso las fotos si se veian
+    // bien -tienen el fallback de la imagen entera mas abajo- y los vídeos
+    // se quedaban sin caratula, porque "-1" no siempre devuelve nada
+    // utilizable para ellos aunque su miniatura SI exista en document.thumbs.
+    const sizes = media?.className === "MessageMediaPhoto" ? media.photo?.sizes || [] : media?.document?.thumbs || [];
+    const bestSize = pickBestPhotoSize(sizes);
+    if (bestSize) {
+        try {
+            const buf = (await client.downloadMedia(message, { thumb: bestSize }));
+            if (isUsableBuf(buf))
+                return buf;
+        }
+        catch {
+            // seguimos con los intentos de abajo
+        }
+    }
     try {
         const buf = (await client.downloadMedia(message, { thumb: -1 }));
-        if (buf)
+        if (isUsableBuf(buf))
             return buf;
     }
     catch {
         // seguimos con el fallback de abajo
     }
-    const media = message.media;
     // Ultimo recurso para fotos: la imagen entera. Telegram ya la comprime al
     // subirla (normalmente <1MB), asi que sigue siendo rapido y esto garantiza
     // que nunca se vea borrosa si el intento de arriba no trajo nada.
     if (media?.className === "MessageMediaPhoto") {
         try {
             const buf = (await client.downloadMedia(message, {}));
-            if (buf)
+            if (isUsableBuf(buf))
                 return buf;
         }
         catch {
             // sin suerte, probamos el ultimo recurso de abajo
         }
     }
-    return (await client.downloadMedia(message, { thumb: 0 }));
+    const last = (await client.downloadMedia(message, { thumb: 0 }));
+    return isUsableBuf(last) ? last : undefined;
 }
 /** Consigue el mensaje de Telegram (de la caché corta si se puede) para un
  * item de la bóveda, resolviendo la entidad del grupo de contenido si hace
@@ -300,7 +384,12 @@ async function registerContentLibraryRoutes(app) {
                 catch {
                     count = null;
                 }
-                return { id: t.id, title: t.title, count };
+                // Telegram asigna a cada tema uno de sus colores fijos de icono
+                // (iconColor, un entero); lo convertimos a hex para pintar el
+                // puntito de color en la lista de carpetas, igual que el panel
+                // de referencia (que en realidad está leyendo ese mismo dato).
+                const color = typeof t.iconColor === "number" ? "#" + (t.iconColor >>> 0).toString(16).padStart(6, "0").slice(-6) : null;
+                return { id: t.id, title: t.title, count, color };
             }));
             topicsCache.set(id, { topics, loadedAt: Date.now() });
             return { topics };
@@ -313,6 +402,50 @@ async function registerContentLibraryRoutes(app) {
             });
         }
     });
+    // Mensajes de TEXTO de un tema de la bóveda (no fotos/vídeos/audios), para
+    // el selector "De la bóveda" de Scripts (Mensajes/Mensajes Pro): permite
+    // guardar en un script un texto ya escrito por la modelo en su bóveda,
+    // incluyendo sus emoji premium (custom emoji animados de Telegram) tal
+    // cual - MessageEntityCustomEmoji marca en qué tramo del texto va cada
+    // uno, por eso se devuelven junto al texto completo (no solo el preview
+    // recortado de /items).
+    app.get("/api/accounts/:id/content-group/topics/:topicId/text-items", async (request, reply) => {
+        const { id, topicId } = request.params;
+        const q = request.query;
+        const account = await prisma_1.prisma.account.findUniqueOrThrow({ where: { id } });
+        if (!account.contentGroupChatId)
+            return reply.code(400).send({ error: "Sin grupo de contenido configurado." });
+        try {
+            const client = await (0, connectionPool_1.getAccountClient)(account);
+            const entity = await getContentGroupEntity(client, id, account.contentGroupChatId);
+            const limit = 50;
+            const raw = await client.getMessages(entity, {
+                limit,
+                replyTo: Number(topicId),
+                offsetId: q.offsetId ? Number(q.offsetId) : undefined,
+            });
+            const rawArr = raw;
+            const items = rawArr
+                .filter((m) => m.message && m.message.trim())
+                .map((m) => ({
+                id: m.id,
+                text: m.message,
+                preview: m.message.slice(0, 90),
+                entities: (m.entities || [])
+                    .filter((e) => e.className === "MessageEntityCustomEmoji")
+                    .map((e) => ({ offset: e.offset, length: e.length, documentId: e.documentId.toString() })),
+                date: m.date ? new Date(m.date * 1000).toISOString() : null,
+            }));
+            const hasMore = rawArr.length >= limit;
+            const nextOffsetId = rawArr.length > 0 ? rawArr[rawArr.length - 1].id : null;
+            return { items, hasMore, nextOffsetId };
+        }
+        catch (err) {
+            request.log.error(err);
+            const detail = err?.errorMessage || err?.message || "";
+            return reply.code(502).send({ error: "No se pudieron leer los textos de ese tema." + (detail ? ` (${detail})` : "") });
+        }
+    });
     app.get("/api/accounts/:id/content-group/topics/:topicId/items", async (request, reply) => {
         const { id, topicId } = request.params;
         // offsetId: para "cargar más" contenido antiguo del tema sin recargar
@@ -321,6 +454,10 @@ async function registerContentLibraryRoutes(app) {
         // Todo/Fotos/Vídeos/Audios de dentro de un tema.
         const q = request.query;
         const typeFilter = q.type && q.type !== "all" ? q.type : null;
+        const cacheKey = `topic-items:${id}:${topicId}:${q.offsetId || "0"}:${q.type || "all"}`;
+        const cachedPayload = getCachedItems(cacheKey);
+        if (cachedPayload)
+            return cachedPayload;
         const account = await prisma_1.prisma.account.findUniqueOrThrow({ where: { id } });
         if (!account.contentGroupChatId)
             return reply.code(400).send({ error: "Sin grupo de contenido configurado." });
@@ -362,6 +499,7 @@ async function registerContentLibraryRoutes(app) {
                         hasThumb: g.some((m) => m.media),
                         type,
                         duration: duration || null,
+                        date: mediaMsg.date ? new Date(mediaMsg.date * 1000).toISOString() : null,
                         isFavorite: favoriteIds.has(String(mediaMsg.id)),
                         note: notes.get(String(mediaMsg.id)) || "",
                     });
@@ -370,12 +508,79 @@ async function registerContentLibraryRoutes(app) {
                 nextOffsetId = rawArr.length > 0 ? rawArr[rawArr.length - 1].id : null;
                 offsetId = nextOffsetId || undefined;
             }
-            return { items: collected.slice(0, limit), hasMore, nextOffsetId };
+            const payload = { items: collected.slice(0, limit), hasMore, nextOffsetId };
+            setCachedItems(cacheKey, payload);
+            return payload;
         }
         catch (err) {
             request.log.error(err);
             const detail = err?.errorMessage || err?.message || "";
             return reply.code(502).send({ error: "No se pudo leer el contenido de ese tema." + (detail ? ` (${detail})` : "") });
+        }
+    });
+    // Vista "Todos los medios": lo mismo que arriba pero sin restringir a un
+    // tema (replyTo), para poder elegir contenido de cualquier carpeta sin
+    // tener que entrar carpeta por carpeta, igual que la fila "Todos los
+    // medios" del panel de referencia.
+    app.get("/api/accounts/:id/content-group/all-items", async (request, reply) => {
+        const { id } = request.params;
+        const q = request.query;
+        const typeFilter = q.type && q.type !== "all" ? q.type : null;
+        const cacheKey = `all-items:${id}:${q.offsetId || "0"}:${q.type || "all"}`;
+        const cachedPayload = getCachedItems(cacheKey);
+        if (cachedPayload)
+            return cachedPayload;
+        const account = await prisma_1.prisma.account.findUniqueOrThrow({ where: { id } });
+        if (!account.contentGroupChatId)
+            return reply.code(400).send({ error: "Sin grupo de contenido configurado." });
+        try {
+            const client = await (0, connectionPool_1.getAccountClient)(account);
+            const entity = await getContentGroupEntity(client, id, account.contentGroupChatId);
+            const favoriteIds = new Set((await prisma_1.prisma.contentFavorite.findMany({ where: { accountId: id }, select: { messageId: true } })).map((f) => f.messageId));
+            const notes = new Map((await prisma_1.prisma.contentNote.findMany({ where: { accountId: id }, select: { messageId: true, note: true } })).map((n) => [n.messageId, n.note]));
+            const limit = 30;
+            const collected = [];
+            let offsetId = q.offsetId ? Number(q.offsetId) : undefined;
+            let nextOffsetId = null;
+            let hasMore = true;
+            const maxRounds = typeFilter ? 6 : 1;
+            for (let round = 0; round < maxRounds && hasMore && collected.length < limit; round++) {
+                const raw = await client.getMessages(entity, { limit, offsetId });
+                const rawArr = raw;
+                const usable = rawArr.filter((m) => m.message || m.media);
+                for (const m of usable)
+                    cacheMessage(id, m);
+                const groups = (0, sender_1.groupByAlbum)(usable);
+                for (const g of groups) {
+                    const mediaMsg = g.find((m) => m.media) || g[0];
+                    const { type, duration } = classifyMedia(mediaMsg.media);
+                    if (typeFilter && type !== typeFilter)
+                        continue;
+                    collected.push({
+                        id: mediaMsg.id,
+                        messageIds: g.map((m) => m.id),
+                        caption: g.find((m) => m.message)?.message?.slice(0, 140) || "",
+                        mediaCount: g.filter((m) => m.media).length,
+                        hasThumb: g.some((m) => m.media),
+                        type,
+                        duration: duration || null,
+                        date: mediaMsg.date ? new Date(mediaMsg.date * 1000).toISOString() : null,
+                        isFavorite: favoriteIds.has(String(mediaMsg.id)),
+                        note: notes.get(String(mediaMsg.id)) || "",
+                    });
+                }
+                hasMore = rawArr.length >= limit;
+                nextOffsetId = rawArr.length > 0 ? rawArr[rawArr.length - 1].id : null;
+                offsetId = nextOffsetId || undefined;
+            }
+            const payload = { items: collected.slice(0, limit), hasMore, nextOffsetId };
+            setCachedItems(cacheKey, payload);
+            return payload;
+        }
+        catch (err) {
+            request.log.error(err);
+            const detail = err?.errorMessage || err?.message || "";
+            return reply.code(502).send({ error: "No se pudo leer el contenido de la bóveda." + (detail ? ` (${detail})` : "") });
         }
     });
     // Favoritos: marcados desde cualquier tema, listados aparte como si fuera
@@ -427,6 +632,7 @@ async function registerContentLibraryRoutes(app) {
                     hasThumb: !!m.media,
                     type,
                     duration: duration || null,
+                    date: m.date ? new Date(m.date * 1000).toISOString() : null,
                     isFavorite: true,
                     note: notes.get(String(m.id)) || "",
                 };
@@ -448,6 +654,8 @@ async function registerContentLibraryRoutes(app) {
             reply.header("Cache-Control", "private, max-age=3600");
             return reply.send(cached);
         }
+        if (isRecentlyFailedThumb(cacheKey))
+            return reply.code(404).send();
         const account = await prisma_1.prisma.account.findUniqueOrThrow({ where: { id } });
         if (!account.contentGroupChatId)
             return reply.code(404).send();
@@ -461,11 +669,15 @@ async function registerContentLibraryRoutes(app) {
                 const [msg] = await client.getMessages(entity, { ids: [Number(messageId)] });
                 message = msg;
             }
-            if (!message || !message.media)
+            if (!message || !message.media) {
+                markFailedThumb(cacheKey);
                 return reply.code(404).send();
+            }
             const buf = (await withThumbSlot(() => downloadContentThumb(client, message)));
-            if (!buf)
+            if (!buf) {
+                markFailedThumb(cacheKey);
                 return reply.code(404).send();
+            }
             (0, mediaCache_1.setCachedMedia)(cacheKey, buf);
             reply.header("Content-Type", "image/jpeg");
             reply.header("Cache-Control", "private, max-age=3600");
@@ -473,6 +685,7 @@ async function registerContentLibraryRoutes(app) {
         }
         catch (err) {
             request.log.error(err);
+            markFailedThumb(cacheKey);
             return reply.code(404).send();
         }
     });
@@ -498,10 +711,10 @@ async function registerContentLibraryRoutes(app) {
                 return reply.send(cached);
             }
             const sizeBytes = mediaSizeBytes(message.media);
-            if (sizeBytes && sizeBytes > MAX_FULL_MEDIA_BYTES) {
+            if (sizeBytes && sizeBytes > exports.MAX_FULL_MEDIA_BYTES) {
                 return reply.code(413).send({ error: "Este archivo pesa demasiado para verlo aquí (más de 60MB)." });
             }
-            const buf = (await withFullMediaSlot(() => client.downloadMedia(message, {})));
+            const buf = (await (0, exports.withFullMediaSlot)(() => client.downloadMedia(message, {})));
             if (!buf)
                 return reply.code(404).send();
             setCachedFullMedia(cacheKey, buf);
@@ -547,10 +760,10 @@ async function registerContentLibraryRoutes(app) {
             if (!message || !message.media)
                 return reply.code(404).send({ error: "No se encontró ese contenido." });
             const sizeBytes = mediaSizeBytes(message.media);
-            if (sizeBytes && sizeBytes > MAX_FULL_MEDIA_BYTES) {
+            if (sizeBytes && sizeBytes > exports.MAX_FULL_MEDIA_BYTES) {
                 return reply.code(413).send({ error: "Este archivo pesa demasiado para reenviarlo así (más de 60MB)." });
             }
-            const buf = (await withFullMediaSlot(() => client.downloadMedia(message, {})));
+            const buf = (await (0, exports.withFullMediaSlot)(() => client.downloadMedia(message, {})));
             if (!buf)
                 return reply.code(502).send({ error: "No se pudo descargar el contenido para reenviarlo." });
             const destEntity = await (0, dialogs_1.resolveDialogEntity)(client, id, body.chatId);

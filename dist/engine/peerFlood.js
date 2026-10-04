@@ -7,6 +7,7 @@ exports.applySoftStart = applySoftStart;
 exports.consumeSoftStartCycle = consumeSoftStartCycle;
 const prisma_1 = require("../utils/prisma");
 const notifications_1 = require("../utils/notifications");
+const waNotify_1 = require("../whatsapp/waNotify");
 /**
  * Detecta si un error lanzado por GramJS/Telegram corresponde a un
  * flood/spam-block de la cuenta (PEER_FLOOD, FLOOD_WAIT_*, o el propio
@@ -90,6 +91,12 @@ async function consumeSoftStartCycle(account) {
     });
 }
 async function notify(account, text) {
+    // "A quién avisar" (Conectar WhatsApp): el aviso que de verdad llega, ya
+    // que usa el WhatsApp vinculado por QR de la agencia (ver waClient.ts).
+    await (0, waNotify_1.notifyTelegramBlock)(text);
+    // Ademas, si esta cuenta tiene configurado un numero propio vía Twilio
+    // (notifyWhatsAppTo), se le manda tambien - por compatibilidad con quien
+    // ya lo tuviera montado.
     if (!account.notifyWhatsAppTo)
         return;
     await (0, notifications_1.sendWhatsAppNotification)(account.notifyWhatsAppTo, text);

@@ -10,6 +10,8 @@ const Password_1 = require("telegram/Password");
 const client_1 = require("../telegram/client");
 const prisma_1 = require("../utils/prisma");
 const crypto_2 = require("../utils/crypto");
+const connectionPool_1 = require("../telegram/connectionPool");
+const agencyContext_1 = require("../utils/agencyContext");
 const PENDING_TTL_MS = 8 * 60 * 1000; // 8 minutos
 const pendingLogins = new Map();
 function assertConfigured() {
@@ -56,19 +58,34 @@ async function finalizeLogin(p) {
     const sessionString = p.client.session.save();
     const me = await p.client.getMe();
     const phoneNumber = me.phone ? `+${me.phone}` : p.phoneNumber || "unknown";
+    // El upsert por phoneNumber es justo lo que hace que "Reconectar cuenta"
+    // (botón en Configuración → Cuentas de Telegram) funcione sin perder nada:
+    // si el teléfono ya existía, esto ACTUALIZA esa misma fila (mismo id) en
+    // vez de crear una cuenta nueva - así todas las campañas, notas, carpetas
+    // guardadas, etc. (todo lo que cuelga de accountId) se quedan intactas,
+    // solo cambia la sesión de Telegram guardada.
     const account = await prisma_1.prisma.account.upsert({
         where: { phoneNumber },
         update: {
             label: p.accountName,
             sessionString: (0, crypto_2.encryptSecret)(sessionString),
             health: "OK",
+            // agencyId NO se toca al reconectar una cuenta ya existente (mismo
+            // teléfono): se queda en la agencia a la que ya pertenecía, nunca se
+            // reasigna sola solo por volver a iniciar sesión.
         },
         create: {
             label: p.accountName,
             phoneNumber,
             sessionString: (0, crypto_2.encryptSecret)(sessionString),
+            agencyId: p.agencyId,
         },
     });
+    // Si ya había una conexión (viva o zombi, ver connectionPool.ts) en el
+    // pool para esta cuenta, la descartamos: si no, el panel seguiría usando
+    // la conexión VIEJA con la sesión antigua hasta el próximo despliegue, en
+    // vez de la que se acaba de iniciar sesión ahora mismo.
+    (0, connectionPool_1.invalidateAccountClient)(account.id);
     p.status = "success";
     p.accountId = account.id;
     try {
@@ -146,6 +163,7 @@ async function registerAccountLoginRoutes(app) {
                 id,
                 kind: "code",
                 client,
+                agencyId: await (0, agencyContext_1.agencyIdFromRequest)(request),
                 accountName: body.accountName,
                 phoneNumber: body.phone,
                 phoneCodeHash: result.phoneCodeHash,
@@ -220,6 +238,7 @@ async function registerAccountLoginRoutes(app) {
                 id,
                 kind: "qr",
                 client,
+                agencyId: await (0, agencyContext_1.agencyIdFromRequest)(request),
                 accountName: body.accountName,
                 status: "pending_scan",
                 createdAt: Date.now(),

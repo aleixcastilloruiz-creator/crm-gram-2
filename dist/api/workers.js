@@ -3,7 +3,8 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.registerWorkerRoutes = registerWorkerRoutes;
 const prisma_1 = require("../utils/prisma");
 const auth_1 = require("../utils/auth");
-const VALID_SECTIONS = new Set(["mensajes", "sfs", "mensajes-pro"]);
+const agencyContext_1 = require("../utils/agencyContext");
+const VALID_SECTIONS = new Set(["mensajes", "sfs", "mensajes-pro", "programar-posts"]);
 function safeParseJson(raw, fallback) {
     try {
         return JSON.parse(raw);
@@ -13,24 +14,50 @@ function safeParseJson(raw, fallback) {
     }
 }
 /**
- * Configuración → Equipo: el dueño (role "admin") da de alta trabajadores y
- * les concede, cuenta por cuenta y apartado por apartado, a qué pueden
- * llegar (Mensajes / SFS / Mensajes Pro). Solo un "admin" logueado puede
- * usar estas rutas -a diferencia de Mensajes/SFS, aquí SÍ hace falta haber
- * iniciado sesión como trabajador admin, porque antes de hoy esto no
- * existía y nadie depende de usarlo sin login-.
+ * Configuración → Equipo: ÚNICAMENTE la cuenta luxe (la sesión de /login con
+ * PANEL_USERNAME/PANEL_PASSWORD, la misma que usa el resto del panel de
+ * administrador) puede dar de alta trabajadores y conceder accesos. Antes
+ * esto exigía haber iniciado sesión TAMBIÉN como un trabajador con role
+ * "admin" (un login aparte en /equipo) — es decir, había que entrar "en
+ * otro sitio" además de en el panel normal. Ahora basta con la sesión de
+ * siempre del panel: si ya estás dentro como cuenta luxe, ya puedes
+ * gestionar el equipo desde Configuración → Equipo sin nada más.
  */
 async function requireAdmin(request, reply) {
-    const worker = await (0, auth_1.getWorkerFromRequest)(request);
-    if (!worker || worker.role !== "admin") {
-        reply.code(403).send({ error: "Solo un administrador del equipo puede gestionar trabajadores." });
+    if ((0, auth_1.getOwnerSessionFromRequest)(request))
+        return;
+    reply.code(403).send({ error: "Solo la cuenta principal (luxe) puede gestionar el equipo." });
+    return reply;
+}
+/** Ver el equipo (aunque sea solo lectura, para el desplegable "Vendido
+ * por") es de "las demás opciones" reservadas al dueño/jefe: un Team líder
+ * tiene aquí el mismo perfil que un Chatter -ninguno de los dos ve el
+ * listado del equipo-, así que esto ya NO deja pasar a ningún trabajador,
+ * tenga el rol que tenga. */
+async function requireOwnerOrAdminWorker(request, reply) {
+    if ((0, auth_1.getOwnerSessionFromRequest)(request))
+        return;
+    reply.code(403).send({ error: "Solo el dueño puede ver el equipo." });
+    return reply;
+}
+/** Multi-agencia: el trabajador que se quiere tocar (:workerId) tiene que
+ * ser de la MISMA agencia que quien pregunta - si no, 404 (como si no
+ * existiera), para que el dueño de una agencia nunca pueda ni editar ni
+ * borrar ni ver los permisos de un trabajador de otra agencia adivinando su
+ * id. */
+async function requireSameAgencyWorker(request, reply) {
+    const { workerId } = request.params;
+    const worker = await prisma_1.prisma.worker.findUnique({ where: { id: workerId }, select: { agencyId: true } });
+    const callerAgencyId = await (0, agencyContext_1.agencyIdFromRequest)(request);
+    if (!worker || worker.agencyId !== callerAgencyId) {
+        reply.code(404).send({ error: "Trabajador no encontrado." });
         return reply;
     }
-    request.worker = worker;
 }
 async function registerWorkerRoutes(app) {
-    app.get("/api/workers", { preHandler: requireAdmin }, async () => {
+    app.get("/api/workers", { preHandler: requireOwnerOrAdminWorker }, async (request) => {
         const workers = await prisma_1.prisma.worker.findMany({
+            where: { agencyId: await (0, agencyContext_1.agencyIdFromRequest)(request) },
             orderBy: { createdAt: "asc" },
             include: { permissions: { include: { account: { select: { id: true, label: true } } } } },
         });
@@ -42,6 +69,7 @@ async function registerWorkerRoutes(app) {
                 role: w.role,
                 active: w.active,
                 canUseBrowser: w.canUseBrowser,
+                readOnly: w.readOnly,
                 schedule: safeParseJson(w.scheduleJson, {}),
                 extraPermissions: safeParseJson(w.extraPermissionsJson, {}),
                 createdAt: w.createdAt,
@@ -76,15 +104,36 @@ async function registerWorkerRoutes(app) {
         if (existing) {
             return reply.code(400).send({ error: "Ya hay un trabajador con ese email." });
         }
+        const callerAgencyId = await (0, agencyContext_1.agencyIdFromRequest)(request);
         const tempPassword = body.password || generateTempPassword();
         const passwordHash = await (0, auth_1.hashPassword)(tempPassword);
-        const worker = await prisma_1.prisma.worker.create({ data: { name, email, passwordHash, role } });
-        const accountIds = Array.isArray(body.accountIds) ? body.accountIds.filter((v) => !!v) : [];
+        const worker = await prisma_1.prisma.worker.create({ data: { name, email, passwordHash, role, agencyId: callerAgencyId } });
+        // Un trabajador nunca puede quedar con acceso a una cuenta de OTRA
+        // agencia, aunque se le pase su id a mano (p.ej. copiando una petición) -
+        // se filtra aquí a las cuentas que de verdad son de la agencia de quien
+        // está dando de alta al trabajador.
+        const requestedAccountIds = Array.isArray(body.accountIds) ? body.accountIds.filter((v) => !!v) : [];
+        const accountIds = requestedAccountIds.length > 0
+            ? (await prisma_1.prisma.account.findMany({
+                where: { id: { in: requestedAccountIds }, agencyId: callerAgencyId },
+                select: { id: true },
+            })).map((a) => a.id)
+            : [];
         if (accountIds.length > 0) {
+            // Un Chatter solo tiene Mensajes y Mensajes Pro. SFS y "Programar
+            // posts" son lo único que distingue a un Team líder (role "admin") de
+            // un Chatter, así que solo se conceden de entrada si el rol elegido ya
+            // es Team líder - de todas formas requireSectionAccess (utils/auth.ts)
+            // bloquea las dos para cualquier Chatter aunque quede algún permiso
+            // suelto, pero mejor no crearlos de entrada si ni le sirven.
             await prisma_1.prisma.workerPermission.createMany({
                 data: accountIds.flatMap((accountId) => [
                     { workerId: worker.id, accountId, section: "mensajes" },
-                    { workerId: worker.id, accountId, section: "sfs" },
+                    ...(role === "admin" ? [
+                        { workerId: worker.id, accountId, section: "sfs" },
+                        { workerId: worker.id, accountId, section: "programar-posts" },
+                    ] : []),
+                    { workerId: worker.id, accountId, section: "mensajes-pro" },
                 ]),
                 skipDuplicates: true,
             });
@@ -96,7 +145,7 @@ async function registerWorkerRoutes(app) {
             generatedPassword: body.password ? undefined : tempPassword,
         };
     });
-    app.put("/api/workers/:workerId", { preHandler: requireAdmin }, async (request, reply) => {
+    app.put("/api/workers/:workerId", { preHandler: [requireAdmin, requireSameAgencyWorker] }, async (request, reply) => {
         const { workerId } = request.params;
         const body = request.body;
         const data = {};
@@ -108,6 +157,8 @@ async function registerWorkerRoutes(app) {
             data.active = !!body.active;
         if (body.canUseBrowser !== undefined)
             data.canUseBrowser = !!body.canUseBrowser;
+        if (body.readOnly !== undefined)
+            data.readOnly = !!body.readOnly;
         if (body.schedule !== undefined)
             data.scheduleJson = JSON.stringify(body.schedule || {});
         if (body.extraPermissions !== undefined)
@@ -125,7 +176,7 @@ async function registerWorkerRoutes(app) {
         await prisma_1.prisma.worker.update({ where: { id: workerId }, data }).catch(() => { });
         return { ok: true, generatedPassword };
     });
-    app.delete("/api/workers/:workerId", { preHandler: requireAdmin }, async (request) => {
+    app.delete("/api/workers/:workerId", { preHandler: [requireAdmin, requireSameAgencyWorker] }, async (request) => {
         const { workerId } = request.params;
         await prisma_1.prisma.worker.delete({ where: { id: workerId } }).catch(() => { });
         return { ok: true };
@@ -133,10 +184,18 @@ async function registerWorkerRoutes(app) {
     // Sustituye TODOS los permisos de un trabajador de una sola vez (mas
     // simple para el editor de casillas del frontend que ir añadiendo/
     // quitando uno a uno).
-    app.put("/api/workers/:workerId/permissions", { preHandler: requireAdmin }, async (request, reply) => {
+    app.put("/api/workers/:workerId/permissions", { preHandler: [requireAdmin, requireSameAgencyWorker] }, async (request, reply) => {
         const { workerId } = request.params;
         const body = request.body;
-        const permissions = (body.permissions || []).filter((p) => p?.accountId && VALID_SECTIONS.has(p.section));
+        const callerAgencyId = await (0, agencyContext_1.agencyIdFromRequest)(request);
+        const requested = (body.permissions || []).filter((p) => p?.accountId && VALID_SECTIONS.has(p.section));
+        // Igual que al crear el trabajador: nunca se concede acceso a una cuenta
+        // que no sea de la propia agencia, aunque venga en el body a mano.
+        const ownAccountIds = new Set((await prisma_1.prisma.account.findMany({
+            where: { id: { in: requested.map((p) => p.accountId) }, agencyId: callerAgencyId },
+            select: { id: true },
+        })).map((a) => a.id));
+        const permissions = requested.filter((p) => ownAccountIds.has(p.accountId));
         await prisma_1.prisma.$transaction([
             prisma_1.prisma.workerPermission.deleteMany({ where: { workerId } }),
             ...(permissions.length > 0

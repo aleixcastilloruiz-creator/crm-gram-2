@@ -8,6 +8,8 @@ const events_1 = require("telegram/events");
 const dialogsCache_1 = require("./dialogsCache");
 const prisma_1 = require("../utils/prisma");
 const phoneCountry_1 = require("./phoneCountry");
+const paymentDetector_1 = require("../utils/paymentDetector");
+const promoGroups_1 = require("./promoGroups");
 const listeners = new Map();
 const attachedAccounts = new Set();
 function subscribeToAccountEvents(accountId, listener) {
@@ -115,6 +117,96 @@ async function maybeAutoBlockByCountry(accountId, client, chatId, message) {
         // best effort: un fallo aqui nunca debe afectar al resto del puente en vivo
     }
 }
+/** Nombre del archivo adjunto (si el mensaje trae uno), para las reglas del
+ * Detector de pagos que buscan también en "nombre del archivo". */
+function extractAttachmentFilename(message) {
+    try {
+        const doc = message.media?.document;
+        const attrs = doc?.attributes || [];
+        const fileAttr = attrs.find((a) => a.className === "DocumentAttributeFilename");
+        return fileAttr?.fileName || null;
+    }
+    catch {
+        return null;
+    }
+}
+/** Detector de pagos: revisa el mensaje (texto/pie de archivo/nombre de
+ * archivo) en busca de datos de pago, tanto si lo escribió el fan como el
+ * equipo. Fire-and-forget, nunca debe retrasar ni tumbar el puente en vivo. */
+async function maybeDetectPayment(accountId, chatId, message) {
+    try {
+        const hasMedia = !!message.media;
+        const bodyText = message.message || "";
+        await (0, paymentDetector_1.detectPaymentInMessage)({
+            accountId,
+            chatId,
+            chatTitle: (0, dialogsCache_1.getCachedDialogTitle)(accountId, chatId) || chatId,
+            senderOut: !!message.out,
+            text: hasMedia ? null : bodyText,
+            caption: hasMedia ? bodyText : null,
+            filename: extractAttachmentFilename(message),
+        });
+    }
+    catch {
+        // best effort: un fallo aqui nunca debe afectar al resto del puente en vivo
+    }
+}
+/**
+ * "Grupos de promoción" → atribución de fans: en cuanto un fan escribe por
+ * primera vez a una cuenta, comprobamos si es miembro de alguno de los
+ * grupos de promoción YA CATALOGADOS de esa cuenta (channels.GetParticipant,
+ * sin descargar listas de miembros - ver telegram/promoGroups.ts), y lo
+ * dejamos guardado (PromoGroupFanAttribution) para el veredicto por admin.
+ * Un mismo fan puede acabar atribuido a varios grupos a la vez (su venta se
+ * repartirá entre todos, ver informes de veredicto).
+ *
+ * "checked" (en memoria, por cuenta) evita repetir la comprobación en CADA
+ * mensaje del mismo fan dentro de este proceso - se vacía en cada
+ * despliegue, así que tras un "railway up" el primer mensaje siguiente de
+ * cada fan activo se vuelve a comprobar una vez (barato: una consulta a la
+ * base de datos si ya está guardado, antes de tocar Telegram para nada).
+ * Nunca se comprueba nada si la cuenta no tiene ningún grupo catalogado
+ * todavía, para no gastar peticiones a Telegram de balde.
+ */
+const attributionChecked = new Map();
+async function maybeAttributePromoGroups(accountId, client, chatId, message) {
+    try {
+        if (message.out)
+            return;
+        if (!(Number(chatId) > 0))
+            return; // solo chats privados (fans), nunca grupos/canales
+        let checked = attributionChecked.get(accountId);
+        if (!checked) {
+            checked = new Set();
+            attributionChecked.set(accountId, checked);
+        }
+        if (checked.has(chatId))
+            return;
+        checked.add(chatId);
+        const already = await prisma_1.prisma.promoGroupFanAttribution.findFirst({ where: { accountId, chatId } });
+        if (already)
+            return; // ya se guardó en un despliegue anterior
+        const catalogued = await prisma_1.prisma.promoGroupAccount.findMany({
+            where: { accountId },
+            select: { promoGroup: { select: { id: true, chatId: true } } },
+        });
+        if (catalogued.length === 0)
+            return; // sin grupos catalogados aun para esta cuenta
+        for (const c of catalogued) {
+            const isMember = await (0, promoGroups_1.isChatMemberOf)(client, c.promoGroup.chatId, chatId);
+            if (!isMember)
+                continue;
+            await prisma_1.prisma.promoGroupFanAttribution.upsert({
+                where: { accountId_chatId_promoGroupId: { accountId, chatId, promoGroupId: c.promoGroup.id } },
+                update: {},
+                create: { accountId, chatId, promoGroupId: c.promoGroup.id },
+            });
+        }
+    }
+    catch {
+        // best effort: un fallo aqui nunca debe afectar al resto del puente en vivo
+    }
+}
 function resolveChatId(message) {
     try {
         // chatId ya resuelve al id "de dialogo" (usuario/chat), igual que en listDialogs/dialogs.ts
@@ -145,9 +237,11 @@ function attachLiveEvents(accountId, client) {
             if (!chatId)
                 return;
             emit(accountId, chatId, message);
-            // No se espera (fire-and-forget): el bloqueo por país nunca debe
-            // retrasar la actualización en vivo del chat.
+            // No se espera (fire-and-forget): el bloqueo por país y el detector de
+            // pagos nunca deben retrasar la actualización en vivo del chat.
             maybeAutoBlockByCountry(accountId, client, chatId, message);
+            maybeDetectPayment(accountId, chatId, message);
+            maybeAttributePromoGroups(accountId, client, chatId, message);
         }
         catch {
             // no dejamos que un fallo de parseo tumbe la conexion

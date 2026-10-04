@@ -544,6 +544,9 @@ async function main() {
     reply.code(401).send({ error: "Autenticación requerida" });
   });
 
+  app.get("/health", async (_request, reply) => reply.send({ ok: true, service: "luxe-crm" }));
+  app.get("/", async (_request, reply) => reply.sendFile("index.html"));
+
   // Panel web (frontend estatico): se sirve desde el mismo servicio/dominio
   // que la API, asi que no hace falta CORS ni un segundo servicio en Railway.
   // app.js/style.css cambian en casi cada deploy; sin esto el navegador (sobre

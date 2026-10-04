@@ -14,12 +14,23 @@ async function listAccountFolders(client) {
     const filters = "filters" in result ? result.filters : result;
     const summaries = [];
     for (const filter of filters) {
-        if (filter.className !== "DialogFilter")
-            continue; // salta Default/Chatlist especiales
+        // "DialogFilter" son las carpetas normales; "DialogFilterChatlist" son
+        // las carpetas compartidas por enlace ("chat folders" de Telegram, cada
+        // vez más usadas) - antes se descartaban junto con "DialogFilterDefault"
+        // (la carpeta implícita "Todos los chats", esa sí sin título real), así
+        // que a cuentas con carpetas compartidas les faltaban muchas en el
+        // selector. Ambos tipos tienen título + includePeers con la misma forma.
+        if (filter.className !== "DialogFilter" && filter.className !== "DialogFilterChatlist")
+            continue;
         const chatIds = [];
-        for (const peer of filter.includePeers ?? []) {
+        // OJO: los chats FIJADOS ("pin") dentro de una carpeta los manda Telegram
+        // aparte, en "pinnedPeers" - NO estan repetidos en "includePeers". Contar
+        // solo includePeers se dejaba fuera todos los chats fijados de la
+        // carpeta, asi que una carpeta con muchos chats fijados aparecia con
+        // muchos menos chats de los que tiene de verdad (p.ej. "37 de 91").
+        for (const peer of [...(filter.pinnedPeers ?? []), ...(filter.includePeers ?? [])]) {
             const id = peerToChatId(peer);
-            if (id)
+            if (id && !chatIds.includes(id))
                 chatIds.push(id);
         }
         summaries.push({
@@ -33,8 +44,17 @@ async function listAccountFolders(client) {
 function peerToChatId(peer) {
     if (peer.className === "InputPeerChannel")
         return `-100${peer.channelId}`;
+    // OJO: a diferencia de un canal/supergrupo, el chatId de un grupo BASICO
+    // (no migrado a supergrupo - el caso tipico de los "grupos restringidos"
+    // de 1 cliente, casi siempre solo 2-3 miembros) se marca en NEGATIVO en
+    // todo el resto del codigo (ver dialog.id.toString() en dialogs.ts, que
+    // usa el mismo "marcado" de Telegram). Devolverlo en positivo aqui hacia
+    // que este chatId nunca coincidiese con el de la lista de chats, y por
+    // tanto la etiqueta de carpeta no apareciese NUNCA para estos grupos
+    // pequeños de cliente (que son justo los que se organizan en carpetas
+    // como "Clientes"/"Grupo cliente").
     if (peer.className === "InputPeerChat")
-        return `${peer.chatId}`;
+        return `-${peer.chatId}`;
     if (peer.className === "InputPeerUser")
         return `${peer.userId}`;
     return null;
@@ -53,7 +73,7 @@ async function addChatToFolderByTitle(client, folderTitle, chatId) {
     const filter = filters.find((f) => f.className === "DialogFilter" && (f.title?.text ?? f.title ?? "").toLowerCase() === folderTitle.toLowerCase());
     if (!filter)
         return { ok: false, reason: `No existe una carpeta de Telegram llamada "${folderTitle}".` };
-    const already = (filter.includePeers ?? []).some((p) => peerToChatId(p) === chatId);
+    const already = [...(filter.pinnedPeers ?? []), ...(filter.includePeers ?? [])].some((p) => peerToChatId(p) === chatId);
     if (already)
         return { ok: true };
     let inputPeer;
