@@ -11,10 +11,10 @@ RUN npm run build
 
 FROM node:20-alpine AS frontend-builder
 WORKDIR /app
-RUN npm install
+RUN apk add --no-cache git
 COPY frontend/package.json frontend/package-lock.json* ./
 RUN npm install
-COPY frontend ./
+COPY frontend/ ./
 RUN npm run build
 
 FROM node:20-alpine
