@@ -14127,4 +14127,13 @@ function renderWaSalesCard(container, groups, settings, accounts) {
   container.appendChild(el("p", { class: "pd-help", style: "margin-top:14px" }, "Los avisos salen desde este WhatsApp hacia los destinos de arriba cada vez que el Detector de pagos encuentra algo. Si no hay ningún destino, el detector sigue guardando el historial pero no avisa."));
 }
 
+window.addEventListener('message', (event) => {
+  if (event.origin !== window.location.origin) return;
+  const data = event.data || {};
+  if (data.type !== 'lureqo:navigate' || !data.view) return;
+  const map = { forwarder:'reenviador', messages:'mensajes', 'messages-pro':'mensajes-pro', accounts:'cuentas', campaigns:'campanas', schedules:'horarios', content:'contenido', scheduled:'programar-posts', reports:'informes', payments:'pagos', whatsapp:'whatsapp', team:'equipo', scripts:'guiones', settings:'configuracion' };
+  const view = map[data.view] || data.view;
+  if (typeof goToView === 'function') goToView(view);
+});
+
 init();
