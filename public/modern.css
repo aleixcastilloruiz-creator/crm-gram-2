@@ -107,5 +107,30 @@ th{background:#11212d!important;color:#c2d0d5!important}td{border-color:rgba(255
 .badge,.pill{border-color:var(--line)!important;background:rgba(255,255,255,.045)!important;color:#cbd8dc!important}
 .link{color:var(--accent)!important}.empty{color:var(--muted)!important}
 hr{border-color:var(--line)!important}
-@media(max-width:900px){:root{--sidebar-w:0px;--accountlist-w:205px}.sidebar{width:0;padding:0;border:0;overflow:hidden}.sidebar.sidebar-mobile-open{width:258px;padding:18px 14px}main#app{padding:26px 20px 55px}}
+@media(max-width:900px){:root{--sidebar-w:0px;--accountlist-w:205px}main#app{padding:26px 20px 55px}}
 @media(max-width:640px){.reenviador-layout{display:block}.account-list{width:100%;border-right:0;border-bottom:1px solid var(--line);padding:12px}.account-list .account-item{display:inline-flex;margin-right:4px}.account-list-title{display:none}main#app{padding:21px 14px 45px}h1{font-size:23px}}
+
+/* Mobile navigation fix: the legacy responsive rule used to collapse the
+   sidebar to width:0 and override the drawer used by app.js. Keep the drawer
+   at its normal width and let body.mobile-nav-open control its visibility. */
+@media (max-width: 860px) {
+  .sidebar {
+    width: 250px !important;
+    max-width: 82vw !important;
+    padding: 18px 14px !important;
+    border-right: 1px solid var(--line) !important;
+    overflow-y: auto !important;
+    overflow-x: hidden !important;
+    box-sizing: border-box !important;
+  }
+  body.mobile-nav-open .sidebar {
+    width: 250px !important;
+    transform: translateX(0) !important;
+  }
+  body:not(.mobile-nav-open) .sidebar {
+    transform: translateX(-100%) !important;
+  }
+  .mobile-nav-backdrop { z-index: 250 !important; }
+  .sidebar { z-index: 260 !important; }
+  .mobile-topbar { z-index: 300 !important; }
+}
