@@ -1,5 +1,5 @@
 FROM node:20-alpine AS build
-RUN apk add --no-cache openssl libc6-compat
+RUN apk add --no-cache openssl libc6-compat git
 WORKDIR /app
 COPY package*.json ./
 RUN npm ci
