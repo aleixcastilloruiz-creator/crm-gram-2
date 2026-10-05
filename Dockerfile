@@ -1,9 +1,9 @@
 FROM node:20-alpine AS build
 RUN apk add --no-cache openssl libc6-compat git
 WORKDIR /app
-COPY package*.json ./
-RUN npm ci
-COPY frontend/package*.json ./frontend/
+COPY package.json ./
+RUN npm install --no-audit --no-fund
+COPY frontend/package.json ./frontend/
 WORKDIR /app/frontend
 RUN npm install --no-audit --no-fund
 WORKDIR /app
