@@ -15,6 +15,8 @@ COPY prisma ./prisma
 RUN npx prisma generate
 
 COPY tsconfig.json ./
+COPY vite.config.js ./
+COPY frontend ./frontend
 COPY src ./src
 RUN npm run build
 
@@ -38,6 +40,7 @@ COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
 COPY prisma ./prisma
 COPY public ./public
+COPY --from=builder /app/public/ui ./public/ui
 # Plantillas de documentos (p.ej. la de Nóminas, templates/payroll-template.docx):
 # no es código TypeScript, así que tsc no la toca - hay que copiarla a mano.
 COPY templates ./templates

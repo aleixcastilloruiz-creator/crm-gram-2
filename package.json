@@ -20,7 +20,7 @@
     "topics:account:prod": "node dist/telegram/topicsCli.js",
     "folder:account": "ts-node-dev --transpile-only src/telegram/folderCli.ts",
     "folder:account:prod": "node dist/telegram/folderCli.js",
-    "build:frontend": "vite build --config vite.config.js"
+    "build:frontend": "vite build"
   },
   "dependencies": {
     "@fastify/cookie": "^9.4.0",
