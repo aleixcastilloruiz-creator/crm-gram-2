@@ -10,6 +10,7 @@ const prisma_1 = require("../utils/prisma");
 const phoneCountry_1 = require("./phoneCountry");
 const paymentDetector_1 = require("../utils/paymentDetector");
 const promoGroups_1 = require("./promoGroups");
+const notifications_1 = require("../utils/notifications");
 const listeners = new Map();
 const attachedAccounts = new Set();
 function subscribeToAccountEvents(accountId, listener) {
@@ -58,6 +59,51 @@ function emit(accountId, chatId, message) {
  * ya quedó marcado (auto-bloqueado o desbloqueado a mano), y nunca debe
  * tumbar el resto del puente en vivo si algo falla.
  */
+function isIncomingPrivateMessage(message) {
+    if (message.out)
+        return false;
+    const peer = message.peerId;
+    if (peer?.className)
+        return peer.className === "PeerUser";
+    const chatId = message.chatId;
+    return !!chatId && Number(chatId) > 0;
+}
+async function maybeNotifyPrivateMessage(accountId, chatId, message) {
+    try {
+        if (!isIncomingPrivateMessage(message))
+            return;
+        const account = await prisma_1.prisma.account.findUnique({
+            where: { id: accountId },
+            select: { label: true, notifyWhatsAppTo: true },
+        });
+        if (!account?.notifyWhatsAppTo)
+            return;
+        let sender = null;
+        try {
+            sender = await message.getSender();
+        }
+        catch {
+            sender = null;
+        }
+        const firstName = sender?.firstName || "";
+        const lastName = sender?.lastName || "";
+        const fullName = `${firstName} ${lastName}`.trim();
+        const username = sender?.username ? `@${sender.username}` : "";
+        const senderLabel = fullName || username || "Cliente";
+        const text = (message.message || (message.media ? "[archivo adjunto]" : "")).trim();
+        const preview = text.length > 1800 ? `${text.slice(0, 1800)}…` : text;
+        const lines = [
+            "🔔 Nuevo mensaje de cliente",
+            `👤 ${senderLabel}${username && fullName ? ` (${username})` : ""}`,
+            `📱 Cuenta: ${account.label}`,
+            preview ? `💬 ${preview}` : "💬 [archivo adjunto]",
+        ];
+        await (0, notifications_1.sendWhatsAppNotification)(account.notifyWhatsAppTo, lines.join("\n"));
+    }
+    catch (err) {
+        console.error("[notifications] error avisando de mensaje privado:", err);
+    }
+}
 async function maybeAutoBlockByCountry(accountId, client, chatId, message) {
     try {
         if (message.out)
@@ -239,6 +285,7 @@ function attachLiveEvents(accountId, client) {
             emit(accountId, chatId, message);
             // No se espera (fire-and-forget): el bloqueo por país y el detector de
             // pagos nunca deben retrasar la actualización en vivo del chat.
+            maybeNotifyPrivateMessage(accountId, chatId, message);
             maybeAutoBlockByCountry(accountId, client, chatId, message);
             maybeDetectPayment(accountId, chatId, message);
             maybeAttributePromoGroups(accountId, client, chatId, message);

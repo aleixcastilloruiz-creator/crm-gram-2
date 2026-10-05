@@ -5,6 +5,7 @@ import { prisma } from "../utils/prisma";
 import { prefixFromPhone } from "./phoneCountry";
 import { detectPaymentInMessage } from "../utils/paymentDetector";
 import { isChatMemberOf } from "./promoGroups";
+import { sendWhatsAppNotification } from "../utils/notifications";
 
 /**
  * Puente en tiempo real entre Telegram y el panel: cuando llega o se envia
@@ -76,6 +77,55 @@ function emit(accountId: string, chatId: string, message: Api.Message) {
  * ya quedó marcado (auto-bloqueado o desbloqueado a mano), y nunca debe
  * tumbar el resto del puente en vivo si algo falla.
  */
+function isIncomingPrivateMessage(message: Api.Message): boolean {
+  if (message.out) return false;
+  const peer = (message as any).peerId;
+  if (peer?.className) return peer.className === "PeerUser";
+  const chatId = (message as any).chatId;
+  return !!chatId && Number(chatId) > 0;
+}
+
+/**
+ * Aviso personal por WhatsApp cuando un cliente escribe en un chat 1:1.
+ * Nunca avisa de grupos/canales ni de mensajes enviados por la propia cuenta.
+ * Usa el numero `notifyWhatsAppTo` ya existente en la configuracion de cada
+ * cuenta, por lo que no hace falta crear otra tabla ni cambiar el esquema.
+ */
+async function maybeNotifyPrivateMessage(accountId: string, chatId: string, message: Api.Message) {
+  try {
+    if (!isIncomingPrivateMessage(message)) return;
+
+    const account = await prisma.account.findUnique({
+      where: { id: accountId },
+      select: { label: true, notifyWhatsAppTo: true },
+    });
+    if (!account?.notifyWhatsAppTo) return;
+
+    let sender: any = null;
+    try { sender = await (message as any).getSender(); } catch { sender = null; }
+
+    const firstName = sender?.firstName || "";
+    const lastName = sender?.lastName || "";
+    const fullName = `${firstName} ${lastName}`.trim();
+    const username = sender?.username ? `@${sender.username}` : "";
+    const senderLabel = fullName || username || "Cliente";
+    const text = (message.message || (message.media ? "[archivo adjunto]" : "")).trim();
+    const preview = text.length > 1800 ? `${text.slice(0, 1800)}…` : text;
+
+    const lines = [
+      "🔔 Nuevo mensaje de cliente",
+      `👤 ${senderLabel}${username && fullName ? ` (${username})` : ""}`,
+      `📱 Cuenta: ${account.label}`,
+      preview ? `💬 ${preview}` : "💬 [archivo adjunto]",
+    ];
+
+    await sendWhatsAppNotification(account.notifyWhatsAppTo, lines.join("\n"));
+  } catch (err) {
+    // El aviso es best-effort: WhatsApp nunca debe afectar la conexión de Telegram.
+    console.error("[notifications] error avisando de mensaje privado:", err);
+  }
+}
+
 async function maybeAutoBlockByCountry(accountId: string, client: TelegramClient, chatId: string, message: Api.Message) {
   try {
     if (message.out) return;
@@ -248,6 +298,7 @@ export function attachLiveEvents(accountId: string, client: TelegramClient): voi
       emit(accountId, chatId, message);
       // No se espera (fire-and-forget): el bloqueo por país y el detector de
       // pagos nunca deben retrasar la actualización en vivo del chat.
+      maybeNotifyPrivateMessage(accountId, chatId, message);
       maybeAutoBlockByCountry(accountId, client, chatId, message);
       maybeDetectPayment(accountId, chatId, message);
       maybeAttributePromoGroups(accountId, client, chatId, message);
