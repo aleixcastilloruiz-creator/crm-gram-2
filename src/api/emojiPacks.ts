@@ -5,7 +5,7 @@ import { getAccountClient } from "../telegram/connectionPool";
 import { resolveDialogEntity } from "../telegram/dialogs";
 import { getCachedMedia, setCachedMedia } from "../telegram/mediaCache";
 
-const MAX_PACKS_PER_ACCOUNT = 20;
+const MAX_PACKS_PER_ACCOUNT = 100;
 
 /**
  * "Emoji premium": sets de emoji animados/custom de Telegram enlazados a
@@ -87,6 +87,10 @@ export async function registerEmojiPackRoutes(app: FastifyInstance) {
     try {
       const client = await getAccountClient(account);
       const set = await getStickerSet(client, id, pack.shortName);
+      const realTitle = (set as any).set?.title;
+      if (realTitle && pack.title !== realTitle) {
+        prisma.accountEmojiPack.update({ where: { id: pack.id }, data: { title: realTitle } }).catch(() => {});
+      }
       const docs = (set as any).documents ?? [];
       const emojis = docs.map((d: any) => {
         const altAttr = (d.attributes || []).find((a: any) => a.className === "DocumentAttributeCustomEmoji" || a.alt !== undefined);

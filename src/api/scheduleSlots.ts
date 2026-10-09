@@ -84,16 +84,22 @@ export async function registerScheduleSlotRoutes(app: FastifyInstance) {
       orderBy: { timeOfDay: "asc" },
     });
     // "Ultimo disparo": la fecha mas reciente en que este horario se marco
-    // como "SENT" (se registra una fila por dia en ScheduleSlotRun).
-    const slotsWithLastRun = await Promise.all(
-      slots.map(async (slot) => {
-        const lastRun = await prisma.scheduleSlotRun.findFirst({
-          where: { scheduleSlotId: slot.id, status: "SENT" },
-          orderBy: { runDate: "desc" },
-        });
-        return { ...slot, lastRunDate: lastRun?.runDate ?? null };
-      })
-    );
+    // como "SENT" (se registra una fila por dia en ScheduleSlotRun). Antes
+    // esto era una consulta a parte POR CADA horario (en paralelo, pero
+    // seguian siendo N consultas a la vez) - con "+ Añadir todos los
+    // horarios" generando hasta 24 de golpe, y el Reenviador pidiendo esto
+    // para cada campaña a la vez al abrir la pantalla de configuracion, se
+    // podian disparar más de cien consultas de golpe. Una sola
+    // agrupacion (groupBy) hace exactamente lo mismo en 1 consulta.
+    const lastRuns = slots.length
+      ? await prisma.scheduleSlotRun.groupBy({
+          by: ["scheduleSlotId"],
+          where: { scheduleSlotId: { in: slots.map((s) => s.id) }, status: "SENT" },
+          _max: { runDate: true },
+        })
+      : [];
+    const lastRunMap = new Map(lastRuns.map((r) => [r.scheduleSlotId, r._max.runDate]));
+    const slotsWithLastRun = slots.map((slot) => ({ ...slot, lastRunDate: lastRunMap.get(slot.id) ?? null }));
     return { slots: slotsWithLastRun };
   });
 

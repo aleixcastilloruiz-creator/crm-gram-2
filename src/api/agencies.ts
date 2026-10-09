@@ -27,17 +27,18 @@ export async function registerAgencyRoutes(app: FastifyInstance) {
   await app.register(async (instance) => {
     instance.addHook("preHandler", requireSuperAdmin());
 
-    // "Ocultar" (ver comentario de Agency.hidden en schema.prisma): por
-    // defecto esta lista NO incluye las agencias ocultas, para que
-    // desaparezcan de verdad de la tabla sin tocar nada de su acceso.
-    // ?includeHidden=true las vuelve a traer (con hidden: true en la
-    // respuesta), para poder seguir gestionándolas desde el panel.
+    // "Ocultar" (ver Agency.hidden en schema.prisma): a petición de Aitor,
+    // esta lista YA NO filtra por "oculta" - se devuelven SIEMPRE todas las
+    // agencias (como dueño del CRM, debe poder ver y tener acceso a
+    // cualquiera que esté dada de alta, nunca que una quede escondida sin
+    // querer). El botón "Ocultar"/"Mostrar" del panel sigue ahí y sigue
+    // guardando el campo hidden por si algún día hace falta otra vez, pero
+    // ya no tiene ningún efecto sobre lo que se ve aquí.
     instance.get("/api/agencies", async (request) => {
-      const { includeHidden } = request.query as { includeHidden?: string };
+      void (request.query as { includeHidden?: string }); // ya no se usa: ver comentario de arriba
       const agencies = await prisma.agency.findMany({
         where: {
           id: { not: LEGACY_AGENCY_ID },
-          ...(includeHidden === "true" ? {} : { hidden: false }),
         },
         orderBy: { createdAt: "desc" },
       });
@@ -99,6 +100,10 @@ export async function registerAgencyRoutes(app: FastifyInstance) {
           name,
           ownerEmail,
           ownerPasswordHash: await hashPassword(ownerPassword),
+          // Prueba gratis de 14 días desde que se da de alta (ver
+          // Agency.trialEndsAt / api/subscription.ts) - pasado esto, si
+          // todavía no ha activado un plan de pago, se le bloquea el acceso.
+          trialEndsAt: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000),
         },
       });
       // Reglas de fábrica del Detector de pagos: para que la agencia nueva

@@ -1,5 +1,5 @@
 import { TelegramClient } from "telegram";
-import { listDialogs, DialogSummary } from "./dialogs";
+import { listDialogs, DialogSummary, isChatMuted } from "./dialogs";
 import { prisma } from "../utils/prisma";
 
 /**
@@ -116,7 +116,12 @@ async function persistDialogTouchToDb(
         lastMessage: message.text,
         lastMessageDate: message.date ? new Date(message.date) : null,
         lastMessageOut: message.out,
-        ...(message.out ? {} : { unreadCount: { increment: 1 } }),
+        // Igual que en memoria (ver touchEntry): si el mensaje es saliente,
+        // el chat queda respondido YA -se pone unreadCount a 0 en vez de
+        // dejarlo como estaba- en vez de solo "no sumar", que es lo que
+        // hacia que una respuesta mandada desde fuera del CRM (la app de
+        // Telegram del movil) no limpiara la burbuja de "sin responder".
+        unreadCount: message.out ? 0 : { increment: 1 },
       },
     });
   } catch {
@@ -152,7 +157,7 @@ const bypassDbOnNextLoad = new Set<string>();
 // distintos), asi que van en su propio mapa.
 const allDialogsCache = new Map<string, CacheEntry>();
 const REFRESH_INTERVAL_MS = 3 * 60 * 1000; // refresco de fondo cada 3 min
-const FETCH_LIMIT = 600; // suficiente para incluir historial antiguo + reciente
+const FETCH_LIMIT = 1000; // antes 600: con tantos fans, los chats más antiguos (semanas atrás) se quedaban fuera de la lista
 // Un listDialogs() que devuelve muy pocos chats (p.ej. 8) para una cuenta
 // que sabemos que tiene fans hablando casi siempre NO es que la cuenta
 // tenga de verdad tan pocos chats: es el mismo patrón que ya vimos con
@@ -165,6 +170,27 @@ const FETCH_LIMIT = 600; // suficiente para incluir historial antiguo + reciente
 const LOW_COUNT_RETRY_THRESHOLD = 15;
 
 function refresh(client: TelegramClient, accountId: string, entry: CacheEntry, includeAllGroups = false): Promise<DialogSummary[]> {
+  // Burbuja de "no leído" que no se quitaba: Telegram NUNCA se entera de que
+  // un chat se ha leído desde aquí (ver "modo shadow" en connectionPool.ts -
+  // a propósito, para que el fan no vea "visto"), así que su propio
+  // unreadCount para ese chat no baja jamás. markDialogRead (más abajo) lo
+  // ponía a 0 en la cache/BD, pero este refresco (cada 3 min, o al forzar
+  // "Recargar chats", o al detectar un chat nuevo) volvía a pedirle la lista
+  // entera a Telegram y SOBREESCRIBÍA ese 0 con el número crudo de Telegram
+  // de nuevo - la burbuja "revivía" sola sin que el trabajador hiciera nada
+  // raro. Antes de pisar entry.dialogs, nos guardamos el unreadCount que ya
+  // llevábamos nosotros (mantenido al día en touchEntry con cada mensaje en
+  // vivo, y puesto a 0 en markDialogRead) y lo restauramos por chat después
+  // - solo se acepta el número crudo de Telegram para un chat que no
+  // teníamos todavía en la cache (de verdad nuevo para nosotros, no hay otro
+  // dato mejor). Si en el hueco entre dos refrescos llegó un mensaje nuevo
+  // que no se vio en vivo (servidor caído, evento perdido...), se detecta
+  // porque cambia lastMessageDate del propio chat y se suma 1 en vez de
+  // dejar el contador vencido en 0 - no es exacto si llegó más de un
+  // mensaje en ese hueco, pero es muchísimo mejor que o bien quedarse en 0
+  // (como si nada hubiera llegado) o bien que vuelva el número de Telegram,
+  // que nunca refleja lo ya leído aquí.
+  const previousByChatId = new Map(entry.dialogs.map((d) => [d.chatId, d]));
   const promise = (async () => {
     let dialogs = await listDialogs(client, accountId, FETCH_LIMIT, entry.extraChatIds, includeAllGroups);
     if (dialogs.length < LOW_COUNT_RETRY_THRESHOLD) {
@@ -173,6 +199,23 @@ function refresh(client: TelegramClient, accountId: string, entry: CacheEntry, i
         if (retryDialogs.length > dialogs.length) dialogs = retryDialogs;
       } catch {
         // si el reintento falla, nos quedamos con lo que ya teniamos de la primera pasada
+      }
+    }
+    for (const d of dialogs) {
+      const prev = previousByChatId.get(d.chatId);
+      if (!prev) continue; // chat nuevo para nosotros: no hay mejor dato que el crudo de Telegram
+      if (d.lastMessageOut) {
+        // El ultimo mensaje de verdad (segun Telegram, ahora mismo) es
+        // nuestro - tanto si se mando desde este CRM como si la creadora
+        // contesto directamente desde la app de Telegram en su movil. Antes
+        // esto se ignoraba y se restauraba el contador viejo sin mas (ver
+        // comentario grande de arriba), asi que un chat respondido desde
+        // fuera del CRM se quedaba con la burbuja de "sin responder" para
+        // siempre, aunque el ultimo mensaje fuera claramente de la creadora.
+        d.unreadCount = 0;
+      } else {
+        const missedIncoming = d.lastMessageDate && d.lastMessageDate !== prev.lastMessageDate;
+        d.unreadCount = missedIncoming ? prev.unreadCount + 1 : prev.unreadCount;
       }
     }
     entry.dialogs = dialogs;
@@ -306,7 +349,12 @@ function touchEntry(
   d.lastMessage = message.text;
   d.lastMessageDate = message.date;
   d.lastMessageOut = message.out;
-  if (!message.out) d.unreadCount = (d.unreadCount || 0) + 1;
+  // Mismo caso que en refresh() de arriba, pero para el mensaje en vivo: si
+  // es saliente (la creadora respondio, desde el CRM o directamente desde
+  // Telegram en su movil), se da el chat por respondido YA, no solo "no
+  // sumar" - antes se dejaba el contador como estaba y la burbuja de "sin
+  // responder" sobrevivia a una respuesta mandada desde fuera del CRM.
+  d.unreadCount = message.out ? 0 : (d.unreadCount || 0) + 1;
   entry.dialogs.splice(idx, 1);
   entry.dialogs.unshift(d);
 }
@@ -370,4 +418,35 @@ export function markDialogsStale(accountId: string): void {
   const entry = cache.get(accountId);
   if (!entry) return; // nada cargado todavia: no hay nada que marcar
   entry.loadedAt = 0;
+}
+
+/** Solo se notifican chats privados y grupos de 2 miembros o menos, y nunca
+ * los silenciados en Telegram. Chat desconocido: privado (id positivo) si. */
+export function shouldNotifyChat(accountId: string, chatId: string): boolean {
+  if (isChatMuted(accountId, chatId)) return false;
+  const d = cache.get(accountId)?.dialogs.find((x) => x.chatId === chatId);
+  if (d) {
+    if (d.isUser) return true;
+    return d.kind !== "channel" && d.participantsCount !== null && d.participantsCount < 3;
+  }
+  return Number(chatId) > 0;
+}
+
+/** Camino rapido para GET /dialogs: devuelve la lista que ya hay en memoria
+ * (o la copia de la base de datos tras un reinicio) SIN esperar a Telegram
+ * ni a la conexion de la cuenta. null si no hay nada que servir todavia. */
+export async function peekCachedDialogs(accountId: string): Promise<DialogSummary[] | null> {
+  let entry = cache.get(accountId);
+  if (entry && entry.forceFreshOnNextGet) return null;
+  if (entry && entry.dialogs.length > 0) return entry.dialogs;
+  if (entry && entry.loading) return null;
+  const fromDb = await loadDialogsFromDb(accountId);
+  if (fromDb.length === 0) return null;
+  entry = cache.get(accountId);
+  if (!entry) {
+    entry = { dialogs: [], loadedAt: 0, loading: null };
+    cache.set(accountId, entry);
+  }
+  if (entry.dialogs.length === 0) entry.dialogs = fromDb;
+  return entry.dialogs;
 }

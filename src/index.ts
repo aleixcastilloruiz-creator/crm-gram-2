@@ -1,3 +1,4 @@
+import { seedEmojiPacksOnce } from "./telegram/emojiSeed";
 import "dotenv/config";
 import path from "path";
 import Fastify from "fastify";
@@ -15,7 +16,7 @@ import { registerMessagesProRoutes } from "./api/messagesPro";
 import { registerContentLibraryRoutes } from "./api/contentLibrary";
 import { registerEmojiPackRoutes } from "./api/emojiPacks";
 import { registerSettingsRoutes } from "./api/settings";
-import { registerFreeChannelRoutes } from "./api/freeChannels";
+import { registerFreeChannelRoutes, registerAccountPricesRoutes } from "./api/freeChannels";
 import { registerModeloConfigRoutes } from "./api/modeloConfig";
 import { registerAuthRoutes } from "./api/auth";
 import { registerWorkerRoutes } from "./api/workers";
@@ -34,17 +35,19 @@ import { registerModelPayrollRoutes } from "./api/modelPayroll";
 import { registerPerformanceRoutes } from "./api/performance";
 import { registerSecurityRoutes } from "./api/security";
 import { registerClockRoutes } from "./api/clock";
+import { registerHelpRoutes } from "./api/help";
 import { registerPaymentAccountsRoutes } from "./api/paymentAccounts";
 import { syncAllPaymentAccounts } from "./payments/paymentSync";
-import { requireSectionAccess, getWorkerFromRequest, getOwnerSessionFromRequest, isDesktopAppRequest } from "./utils/auth";
+import { requireSectionAccess, requireContentLibraryAccess, getWorkerFromRequest, getOwnerSessionFromRequest, isDesktopAppRequest } from "./utils/auth";
 import { startOrchestrator } from "./engine/orchestrator";
-import { closeAllAccountClients, getAccountClient } from "./telegram/connectionPool";
+import { closeAllAccountClients, getAccountClient, reconnectAllAccountsGently } from "./telegram/connectionPool";
 import { getCachedDialogs } from "./telegram/dialogsCache";
 import { prisma } from "./utils/prisma";
 import { ensureDefaultPaymentRules, fixLooseIbanRulePattern } from "./utils/paymentDetector";
 import { migrateTeamLeadsToExplicitPermissions } from "./utils/teamLeadMigration";
 import { ensureLegacyAgency, LEGACY_AGENCY_ID } from "./utils/agencyMigration";
 import { registerAgencyRoutes } from "./api/agencies";
+import { registerSubscriptionRoutes, isAgencyBlockedForBilling } from "./api/subscription";
 import { resumeWhatsAppIfLinked } from "./whatsapp/waClient";
 
 // NOTA: antes hacía falta un "admin" de Equipo (creado automáticamente al
@@ -176,8 +179,18 @@ async function main() {
     /^\/api\/accounts\/[^/]+\/unread-summary$/,
     /^\/api\/accounts\/[^/]+\/fan-notes-lists$/,
     /^\/api\/accounts\/[^/]+\/note$/,
+    /^\/api\/accounts\/[^/]+\/prices$/,
     /^\/api\/accounts\/[^/]+\/scripts$/,
     /^\/api\/accounts\/[^/]+\/stream$/,
+    // Notificaciones de Mensajes Pro con varias creadoras a la vez y las
+    // insignias de 'sin leer' de la barra de pestañas (ver
+    // /api/accounts/live-stream y /api/accounts/unread-summary-bulk en
+    // messages.ts) - sin estas dos, ningún trabajador (Team líder ni
+    // Chatter) podía conectar ninguna de las dos, así que las
+    // notificaciones de escritorio y las insignias nunca llegaban a
+    // funcionar en Mensajes Pro para el equipo, solo para el dueño.
+    /^\/api\/accounts\/live-stream$/,
+    /^\/api\/accounts\/unread-summary-bulk$/,
     /^\/api\/accounts\/[^/]+\/content-group(\/.*)?$/,
     /^\/api\/scripts\/[^/]+$/,
     // "Servicio"/"Método de pago" del formulario de registrar venta (ver
@@ -219,8 +232,11 @@ async function main() {
     /^\/pro\/api\/accounts\/[^/]+\/unread-summary$/,
     /^\/pro\/api\/accounts\/[^/]+\/fan-notes-lists$/,
     /^\/pro\/api\/accounts\/[^/]+\/note$/,
+    /^\/pro\/api\/accounts\/[^/]+\/prices$/,
     /^\/pro\/api\/accounts\/[^/]+\/scripts$/,
     /^\/pro\/api\/accounts\/[^/]+\/stream$/,
+    /^\/pro\/api\/accounts\/live-stream$/,
+    /^\/pro\/api\/accounts\/unread-summary-bulk$/,
     /^\/pro\/api\/accounts\/[^/]+\/content-group(\/.*)?$/,
     /^\/pro\/api\/scripts\/[^/]+$/,
     /^\/pro\/api\/accounts\/[^/]+\/sales\/[^/]+$/,
@@ -292,6 +308,7 @@ async function main() {
   // concreta, con un 403 claro en vez de dejarle ver o desconectar el
   // WhatsApp de otra agencia.
   const NEW_AGENCY_OWNER_ALLOWED_PATH_PATTERNS: RegExp[] = [
+    /^\/api\/subscription(\/.*)?$/,
     /^\/api\/accounts(\/.*)?$/,
     /^\/api\/account-login\//,
     /^\/api\/workers(\/.*)?$/,
@@ -429,6 +446,12 @@ async function main() {
     // 2) Login/logout/sesión de Equipo: tiene que poder llegar sin Basic Auth.
     if (url.startsWith("/api/auth/")) return;
 
+    // Webhook de Stripe: lo llama Stripe directamente, sin ninguna cookie
+    // nuestra - su propia firma (STRIPE_WEBHOOK_SECRET, ver api/subscription.ts)
+    // es la que garantiza que viene de verdad de Stripe, así que tiene que
+    // poder llegar sin pasar por este guardia de sesión/agencia.
+    if (url === "/api/subscription/webhook") return;
+
     // 3) Cookie de sesión del dueño (portal /login, mismas credenciales de
     // PANEL_USERNAME/PANEL_PASSWORD - ver utils/auth.ts y api/auth.ts). Ya
     // NO se acepta el Basic Auth "de toda la vida" aquí: si se siguiera
@@ -448,6 +471,22 @@ async function main() {
     if (!ownerSession) {
       worker = await getWorkerFromRequest(request);
       if (worker) callerAgencyId = worker.agencyId;
+    }
+
+    // Muro de pago (solo agencias NUEVAS que usan este CRM como servicio de
+    // pago - nunca "legacy-agency", ver isAgencyBlockedForBilling): si la
+    // prueba gratuita ya terminó sin activar un plan, o hay un impago de más
+    // de 3 días, se bloquea TODO excepto la propia pantalla de Suscripción
+    // (para que el dueño pueda entrar a pagar) y el login/logout de siempre.
+    // El súper-admin (tú) NUNCA se bloquea con esto, ni siquiera "viendo
+    // como" una agencia nueva sin pagar (Configuración → Agencias → "Ver
+    // datos") - tienes que poder entrar a revisarla/suspenderla igual.
+    if (callerAgencyId && !ownerSession?.isSuperAdmin && !url.startsWith("/api/subscription")) {
+      const blockedReason = await isAgencyBlockedForBilling(callerAgencyId);
+      if (blockedReason) {
+        reply.code(402).send({ error: blockedReason });
+        return;
+      }
     }
 
     // Si la URL apunta a una cuenta concreta (/api/accounts/:id/... o
@@ -517,7 +556,7 @@ async function main() {
       // normal) tampoco puede seguir usando ninguna ruta desde un navegador
       // normal a partir de aquí.
       if (!worker.canUseBrowser && !isDesktopAppRequest(request)) {
-        reply.code(403).send({ error: "Esta cuenta solo puede entrar desde la aplicación de escritorio de LUREQO CRM." });
+        reply.code(403).send({ error: "Esta cuenta solo puede entrar desde la aplicación de escritorio de LUREQO." });
         return;
       }
       // "Solo lectura" (Equipo → Permisos, Worker.readOnly): puede ver todo
@@ -544,9 +583,6 @@ async function main() {
     reply.code(401).send({ error: "Autenticación requerida" });
   });
 
-  app.get("/health", async (_request, reply) => reply.send({ ok: true, service: "luxe-crm" }));
-  app.get("/", async (_request, reply) => reply.sendFile("index.html"));
-
   // Panel web (frontend estatico): se sirve desde el mismo servicio/dominio
   // que la API, asi que no hace falta CORS ni un segundo servicio en Railway.
   // app.js/style.css cambian en casi cada deploy; sin esto el navegador (sobre
@@ -564,9 +600,27 @@ async function main() {
       }
     },
   });
+
+  // Web de guías (website/, Next.js export estático) servida en /crm desde
+  // este mismo servicio/dominio - así se puede mandar un enlace público tipo
+  // https://luxefan.es/crm sin depender de Vercel ni de un subdominio aparte.
+  // Se genera con `npm run build` dentro de website/ (output: "export",
+  // basePath: "/crm") y se copia tal cual a backend/public-crm antes de cada
+  // deploy que la toque.
+  await app.register(fastifyStatic, {
+    root: path.join(__dirname, "..", "public-crm"),
+    prefix: "/crm",
+    decorateReply: false,
+    redirect: true,
+  });
+
   app.setNotFoundHandler((request, reply) => {
     if (request.raw.url?.startsWith("/api/")) {
       reply.code(404).send({ error: "not found" });
+      return;
+    }
+    if (request.raw.url?.startsWith("/crm")) {
+      reply.code(404).send("Página no encontrada");
       return;
     }
     reply.sendFile("index.html");
@@ -591,7 +645,11 @@ async function main() {
     await registerMessagesRoutes(instance);
   });
   await app.register(async (instance) => {
-    instance.addHook("preHandler", requireSectionAccess("sfs"));
+    // NO es requireSectionAccess("sfs") a proposito: "Contenido de la
+    // modelo" es la boveda que usa Mensajes normal (y tambien SFS -> Chat,
+    // que comparte el mismo composer), no la pestaña SFS en si - ver el
+    // comentario grande en requireContentLibraryAccess (utils/auth.ts).
+    instance.addHook("preHandler", requireContentLibraryAccess());
     await registerContentLibraryRoutes(instance);
   });
 
@@ -631,9 +689,25 @@ async function main() {
     await registerWorkerRoutes(instance);
   }, { prefix: "/pro" });
 
+  // Mismo caso otra vez: Mensajes Pro llama a todo con el prefijo /pro (ver
+  // API_BASE en app.js), así que "Precios modelo" también necesita su
+  // propio registro aquí para no dar 404 en esa pantalla.
+  await app.register(async (instance) => {
+    instance.addHook("preHandler", requireSectionAccess("mensajes-pro"));
+    await registerAccountPricesRoutes(instance);
+  }, { prefix: "/pro" });
+
   await registerEmojiPackRoutes(app);
   await registerSettingsRoutes(app);
   await registerFreeChannelRoutes(app);
+  // "Precios modelo": accesible tambien para un Chatter/Team lider con
+  // Mensajes concedido en esa cuenta (ver pestaña nueva en
+  // renderNotesPanel, app.js) - el dueño sigue entrando igual (sin cookie
+  // de trabajador, requireSectionAccess no restringe nada).
+  await app.register(async (instance) => {
+    instance.addHook("preHandler", requireSectionAccess("mensajes"));
+    await registerAccountPricesRoutes(instance);
+  });
   await registerModeloConfigRoutes(app);
   await registerAuthRoutes(app);
   await registerWorkerRoutes(app);
@@ -677,8 +751,10 @@ async function main() {
   await registerPerformanceRoutes(app);
   await registerSecurityRoutes(app);
   await registerClockRoutes(app);
+  await registerHelpRoutes(app);
   await registerPaymentAccountsRoutes(app);
   await registerAgencyRoutes(app);
+  await registerSubscriptionRoutes(app);
 
   // Multi-agencia: se siembra ANTES de aceptar peticiones (a diferencia de
   // las migraciones de abajo, que son best-effort y pueden esperar) porque
@@ -709,6 +785,11 @@ async function main() {
   // vuelve a la carga perezosa de siempre (solo al abrir Mensajes de esa
   // cuenta) hasta encontrar una forma más segura de precalentar.
   // warmUpDialogsCache().catch(() => {});
+
+  // Reconexión escalonada de las cuentas tras arrancar (solo conectar, sin pedir
+  // chats; empieza a los 90s y va de una en una). Ver connectionPool.ts.
+  reconnectAllAccountsGently().catch(() => {});
+  seedEmojiPacksOnce().catch(() => {});
 
   await startOrchestrator();
 

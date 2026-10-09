@@ -1,8 +1,8 @@
 {
-  "name": "lureqo-crm",
+  "name": "lureqo-crm-backend",
   "version": "0.1.0",
   "private": true,
-  "description": "Motor de reenvío y automatización para LUREQO CRM",
+  "description": "Motor de reenvio/scheduler para LUREQO - CRM Telegram",
   "main": "dist/index.js",
   "scripts": {
     "dev": "ts-node-dev --respawn --transpile-only src/index.ts",
@@ -37,9 +37,10 @@
     "input": "^1.0.1",
     "jsonwebtoken": "^9.0.2",
     "pdfkit": "^0.15.0",
-    "pizzip": "^3.1.6",
     "pino": "^9.5.0",
+    "pizzip": "^3.1.6",
     "qrcode": "^1.5.4",
+    "stripe": "^23.0.0",
     "telegram": "^2.26.16"
   },
   "devDependencies": {

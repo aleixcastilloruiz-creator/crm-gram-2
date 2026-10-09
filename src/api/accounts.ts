@@ -1,7 +1,8 @@
 import { FastifyInstance } from "fastify";
 import { prisma } from "../utils/prisma";
-import { closeAccountClient } from "../telegram/connectionPool";
+import { closeAccountClient, getAccountConnectionStatus } from "../telegram/connectionPool";
 import { clearDialogsCache } from "../telegram/dialogsCache";
+import { syncSubscriptionQuantity } from "./subscription";
 import { nowInTimezone, toMinutes } from "../engine/fixedEngine";
 import { agencyIdFromRequest } from "../utils/agencyContext";
 
@@ -34,7 +35,10 @@ export async function registerAccountRoutes(app: FastifyInstance) {
         _count: { select: { campaigns: true, sourceGroups: true } },
       },
     });
-    return { accounts };
+    // connectionStatus: ver comentario de getAccountConnectionStatus - es el
+    // estado real del proceso ahora mismo, no el campo "health" de la fila
+    // (que puede llevar horas sin reflejar una sesion caida de verdad).
+    return { accounts: accounts.map((a) => ({ ...a, connectionStatus: getAccountConnectionStatus(a.id) })) };
   });
 
   app.get("/api/accounts/:id", async (request) => {
@@ -99,7 +103,12 @@ export async function registerAccountRoutes(app: FastifyInstance) {
       return;
     }
     await closeAccountClient(id);
+    const agencyId = existing.agencyId;
     await prisma.account.delete({ where: { id } });
+    // Suscripción: una modelo menos - se ajusta la cantidad de la
+    // suscripción de Stripe si esta agencia ya tiene un plan activo (ver
+    // syncSubscriptionQuantity en api/subscription.ts). Fire-and-forget.
+    syncSubscriptionQuantity(agencyId).catch(() => {});
     return { ok: true };
   });
 

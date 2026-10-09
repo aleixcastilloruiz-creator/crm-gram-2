@@ -112,6 +112,50 @@ export async function registerPromoGroupRoutes(app: FastifyInstance) {
     return { ok: true };
   });
 
+  // ---------- Carpetas propias del CRM (nada que ver con Telegram) ----------
+  app.get("/api/promo-group-folders", async (request) => {
+    const agencyId = await agencyIdFromRequest(request);
+    const folders = await prisma.promoGroupFolder.findMany({
+      where: { agencyId },
+      orderBy: { name: "asc" },
+      include: { _count: { select: { groups: true } } },
+    });
+    return { folders: folders.map((f) => ({ id: f.id, name: f.name, groupCount: f._count.groups })) };
+  });
+
+  app.post("/api/promo-group-folders", async (request, reply) => {
+    const body = request.body as { name?: string };
+    const name = (body.name || "").trim();
+    if (!name) return reply.code(400).send({ error: "La carpeta necesita un nombre." });
+    const agencyId = await agencyIdFromRequest(request);
+    const existing = await prisma.promoGroupFolder.findUnique({ where: { agencyId_name: { agencyId, name } } });
+    if (existing) return reply.code(400).send({ error: "Ya existe una carpeta con ese nombre." });
+    const folder = await prisma.promoGroupFolder.create({ data: { agencyId, name } });
+    return { folder };
+  });
+
+  app.patch("/api/promo-group-folders/:id", async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const body = request.body as { name?: string };
+    const name = (body.name || "").trim();
+    if (!name) return reply.code(400).send({ error: "La carpeta necesita un nombre." });
+    const agencyId = await agencyIdFromRequest(request);
+    const { count } = await prisma.promoGroupFolder.updateMany({ where: { id, agencyId }, data: { name } });
+    if (count === 0) return reply.code(404).send({ error: "Carpeta no encontrada." });
+    const folder = await prisma.promoGroupFolder.findUnique({ where: { id } });
+    return { folder };
+  });
+
+  app.delete("/api/promo-group-folders/:id", async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const agencyId = await agencyIdFromRequest(request);
+    // Los grupos ya clasificados con esta carpeta quedan "Sin carpeta"
+    // (onDelete: SetNull en el esquema) en vez de borrarse.
+    const { count } = await prisma.promoGroupFolder.deleteMany({ where: { id, agencyId } });
+    if (count === 0) return reply.code(404).send({ error: "Carpeta no encontrada." });
+    return { ok: true };
+  });
+
   // ---------- Catálogo de grupos/canales ----------
 
   // "Leer grupos de esta creadora": lee en vivo de Telegram los
@@ -156,18 +200,21 @@ export async function registerPromoGroupRoutes(app: FastifyInstance) {
   // (ninguna cuenta lo tiene ya clasificado... en realidad se refiere a "sin
   // admin"), búsqueda por título.
   app.get("/api/promo-groups", async (request) => {
-    const q = request.query as { accountId?: string; search?: string; onlyUnassigned?: string };
+    const q = request.query as { accountId?: string; search?: string; onlyUnassigned?: string; promoGroupFolderId?: string; onlyUnassignedFolder?: string };
     const agencyId = await agencyIdFromRequest(request);
     const where: any = { agencyId };
     if (q.accountId) where.accounts = { some: { accountId: q.accountId } };
     if (q.search) where.title = { contains: q.search, mode: "insensitive" };
     if (q.onlyUnassigned === "true") where.promoAdminId = null;
+    if (q.promoGroupFolderId) where.promoGroupFolderId = q.promoGroupFolderId;
+    if (q.onlyUnassignedFolder === "true") where.promoGroupFolderId = null;
 
     const groups = await prisma.promoGroup.findMany({
       where,
       orderBy: { title: "asc" },
       include: {
         promoAdmin: { select: { id: true, name: true } },
+        promoGroupFolder: { select: { id: true, name: true } },
         accounts: { include: { account: { select: { id: true, label: true } } } },
       },
     });
@@ -195,27 +242,50 @@ export async function registerPromoGroupRoutes(app: FastifyInstance) {
       const key = `${s.accountId}|${s.chatId}`;
       salesCountByFan.set(key, (salesCountByFan.get(key) || 0) + 1);
     }
+    // Igual que fansByGroup, pero separado por creadora dentro del mismo
+    // grupo - un grupo puede tener varias modelos a la vez (ver
+    // PromoGroupAccount) y se quiere poder ver "con esta modelo hablaron X,
+    // con esta otra Y" en vez de solo el total combinado del grupo.
     const fansByGroup = new Map<string, Set<string>>();
+    const fansByGroupAccount = new Map<string, Map<string, Set<string>>>();
     for (const a of attributions as { promoGroupId: string; accountId: string; chatId: string }[]) {
       const key = `${a.accountId}|${a.chatId}`;
       if (!fansByGroup.has(a.promoGroupId)) fansByGroup.set(a.promoGroupId, new Set());
       fansByGroup.get(a.promoGroupId)!.add(key);
+      if (!fansByGroupAccount.has(a.promoGroupId)) fansByGroupAccount.set(a.promoGroupId, new Map());
+      const byAccount = fansByGroupAccount.get(a.promoGroupId)!;
+      if (!byAccount.has(a.accountId)) byAccount.set(a.accountId, new Set());
+      byAccount.get(a.accountId)!.add(key);
+    }
+
+    function countFanSet(fanSet: Set<string>) {
+      let compraron = 0;
+      let ventas = 0;
+      for (const key of fanSet) {
+        const c = salesCountByFan.get(key) || 0;
+        if (c > 0) {
+          compraron++;
+          ventas += c;
+        }
+      }
+      const hablaron = fanSet.size;
+      const conversion = hablaron > 0 ? (compraron / hablaron) * 100 : null;
+      return { hablaron, compraron, ventas, conversion };
     }
 
     return {
       groups: groups.map((g) => {
         const fanSet = fansByGroup.get(g.id) || new Set<string>();
-        const hablaron = fanSet.size;
-        let compraron = 0;
-        let ventas = 0;
-        for (const key of fanSet) {
-          const c = salesCountByFan.get(key) || 0;
-          if (c > 0) {
-            compraron++;
-            ventas += c;
-          }
-        }
-        const conversion = hablaron > 0 ? (compraron / hablaron) * 100 : null;
+        const totals = countFanSet(fanSet);
+        const byAccount = fansByGroupAccount.get(g.id) || new Map<string, Set<string>>();
+        // Desglose "con esta modelo hablaron X" - una entrada por cada
+        // creadora que esté dentro del grupo (aunque todavía no tenga
+        // ningún fan atribuido, para que no "desaparezca" de la lista).
+        const porModelo = g.accounts.map((a) => ({
+          accountId: a.account.id,
+          label: a.account.label,
+          ...countFanSet(byAccount.get(a.account.id) || new Set<string>()),
+        }));
         return {
           id: g.id,
           chatId: g.chatId,
@@ -224,12 +294,15 @@ export async function registerPromoGroupRoutes(app: FastifyInstance) {
           memberCount: g.memberCount,
           promoAdminId: g.promoAdminId,
           promoAdminName: g.promoAdmin?.name ?? null,
+          promoGroupFolderId: g.promoGroupFolderId,
+          promoGroupFolderName: g.promoGroupFolder?.name ?? null,
           // "Modelos dentro": creadoras (cuentas) que están metidas en este grupo.
           accounts: g.accounts.map((a) => ({ id: a.account.id, label: a.account.label })),
-          hablaron,
-          compraron,
-          conversion,
-          ventas,
+          hablaron: totals.hablaron,
+          compraron: totals.compraron,
+          conversion: totals.conversion,
+          ventas: totals.ventas,
+          porModelo,
         };
       }),
     };
@@ -255,23 +328,53 @@ export async function registerPromoGroupRoutes(app: FastifyInstance) {
     return { ok: true, updated: count };
   });
 
-  // Asignar (o quitar, con promoAdminId: null) el admin de un grupo ya
-  // catalogado - el desplegable "Admin" de cada fila de la tabla.
+  // Asignar (o quitar, con promoAdminId/promoGroupFolderId: null) el admin
+  // y/o la carpeta de un grupo ya catalogado - los desplegables "Admin" y
+  // "Carpeta" de cada fila de la tabla. Solo se toca lo que venga presente
+  // en el body (para no borrar la carpeta al cambiar solo el admin, y
+  // viceversa).
   app.patch("/api/promo-groups/:id", async (request, reply) => {
     const { id } = request.params as { id: string };
-    const body = request.body as { promoAdminId?: string | null };
+    const body = request.body as { promoAdminId?: string | null; promoGroupFolderId?: string | null };
     const agencyId = await agencyIdFromRequest(request);
-    if (body.promoAdminId) {
-      const admin = await prisma.promoAdmin.findFirst({ where: { id: body.promoAdminId, agencyId } });
-      if (!admin) return reply.code(400).send({ error: "Ese admin no existe en tu agencia." });
+    const data: { promoAdminId?: string | null; promoGroupFolderId?: string | null } = {};
+    if ("promoAdminId" in body) {
+      if (body.promoAdminId) {
+        const admin = await prisma.promoAdmin.findFirst({ where: { id: body.promoAdminId, agencyId } });
+        if (!admin) return reply.code(400).send({ error: "Ese admin no existe en tu agencia." });
+      }
+      data.promoAdminId = body.promoAdminId ?? null;
     }
-    const { count } = await prisma.promoGroup.updateMany({
-      where: { id, agencyId },
-      data: { promoAdminId: body.promoAdminId ?? null },
-    });
+    if ("promoGroupFolderId" in body) {
+      if (body.promoGroupFolderId) {
+        const folder = await prisma.promoGroupFolder.findFirst({ where: { id: body.promoGroupFolderId, agencyId } });
+        if (!folder) return reply.code(400).send({ error: "Esa carpeta no existe en tu agencia." });
+      }
+      data.promoGroupFolderId = body.promoGroupFolderId ?? null;
+    }
+    const { count } = await prisma.promoGroup.updateMany({ where: { id, agencyId }, data });
     if (count === 0) return reply.code(404).send({ error: "Grupo no encontrado." });
     const group = await prisma.promoGroup.findUnique({ where: { id } });
     return { group };
+  });
+
+  // Asignar la misma carpeta (o quitarla, con promoGroupFolderId: null) a
+  // VARIOS grupos a la vez - mismo patrón que bulk-assign para el admin.
+  app.post("/api/promo-groups/bulk-assign-folder", async (request, reply) => {
+    const body = request.body as { groupIds?: string[]; promoGroupFolderId?: string | null };
+    if (!body.groupIds || body.groupIds.length === 0) {
+      return reply.code(400).send({ error: "No hay ningún grupo seleccionado." });
+    }
+    const agencyId = await agencyIdFromRequest(request);
+    if (body.promoGroupFolderId) {
+      const folder = await prisma.promoGroupFolder.findFirst({ where: { id: body.promoGroupFolderId, agencyId } });
+      if (!folder) return reply.code(400).send({ error: "Esa carpeta no existe en tu agencia." });
+    }
+    const { count } = await prisma.promoGroup.updateMany({
+      where: { id: { in: body.groupIds }, agencyId },
+      data: { promoGroupFolderId: body.promoGroupFolderId ?? null },
+    });
+    return { ok: true, updated: count };
   });
 
   // ---------- Precios por admin y creadora ----------

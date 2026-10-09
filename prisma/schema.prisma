@@ -1,4 +1,4 @@
-// Esquema de datos del motor "Reenviador" de LUREQO CRM
+// Esquema de datos del motor "Reenviador" de LUREQO
 // Diseño propio (no copiado de ningún producto de terceros): cubre el mismo
 // conjunto de funcionalidad de negocio (multi-cuenta, multi-campaña, modo
 // aleatorio + horarios fijos, control anti-baneo) descrito por el usuario.
@@ -63,7 +63,7 @@ enum StoryPrivacy {
 }
 
 // ---------- Multi-agencia ----------
-// Una Agencia = un cliente de LUREQO con su propio panel privado dentro del
+// Una Agencia = un cliente de LUXEFAN con su propio panel privado dentro del
 // MISMO despliegue de Railway: todo lo que cuelgue de agencyId (cuentas de
 // Telegram, equipo...) queda aislado del resto. El súper-admin (login con
 // PANEL_USERNAME/PANEL_PASSWORD de Railway, el mismo candado de siempre)
@@ -71,7 +71,7 @@ enum StoryPrivacy {
 // ni datos de ninguna - solo alta/baja, ver requireSuperAdmin en auth.ts.
 //
 // La agencia "legacy-agency" (id FIJO, sembrada sola al arrancar si no
-// existe - ver utils/agencyMigration.ts) es la propia LUREQO CRM:
+// existe - ver utils/agencyMigration.ts) es la propia LUREQO:
 // todo lo que ya existía en el CRM antes de esta funcionalidad se queda ahí
 // automáticamente (agencyId por defecto), sin perder ni mezclar nada. Esa
 // agencia en concreto se sigue gestionando con las credenciales de entorno
@@ -94,6 +94,26 @@ model Agency {
   // para seguir pudiendo gestionarla desde el panel).
   hidden            Boolean  @default(false)
   createdAt         DateTime @default(now())
+
+  // Suscripción de pago (solo agencias NUEVAS creadas desde Configuración →
+  // Agencias; "legacy-agency", tu propia agencia LUREQO, nunca
+  // paga - ver LEGACY_AGENCY_ID). Stripe es la fuente de verdad del estado
+  // de pago de verdad; estos campos son una copia local para no tener que
+  // preguntarle a Stripe en cada carga del panel ni en cada petición (ver
+  // api/subscription.ts).
+  stripeCustomerId     String?   // cus_... una vez se activa el plan por primera vez
+  stripeSubscriptionId String?   // sub_...
+  // null = todavía no se ha activado nunca (puede seguir en prueba gratis o
+  // ya habérsele acabado); "trialing"/"active"/"past_due"/"canceled"/"unpaid"
+  // tal cual los manda el webhook de Stripe (customer.subscription.updated).
+  subscriptionStatus   String?
+  trialEndsAt          DateTime? // fin de la prueba gratis de 14 días, puesto al crear la agencia
+  currentPeriodEnd     DateTime? // próxima fecha de cobro, tal cual la manda Stripe
+  // Primer impago detectado (status pasó a "past_due") - el acceso se
+  // bloquea del todo a los 3 días de esto si para entonces no ha vuelto a
+  // "active" (ver isAgencyBlockedForBilling). Se limpia en cuanto vuelve a
+  // "active".
+  pastDueSince         DateTime?
 }
 
 model Account {
@@ -226,6 +246,7 @@ model Account {
   fanSales     FanSale[]
   chatterMessageLogs ChatterMessageLog[]
   cachedDialogs CachedDialog[]
+  storedMessages StoredMessage[]
   promoAdminPrices       PromoAdminPrice[]
   promoGroupAccounts     PromoGroupAccount[]
   promoGroupAttributions PromoGroupFanAttribution[]
@@ -245,6 +266,7 @@ model Account {
   sfsNotes     SfsNote[]
   japOrders    JapOrder[]
   modelPayrolls ModelPayroll[]
+  deletedMessageLogs DeletedMessageLog[]
 }
 
 // ---------- Conectar WhatsApp ----------
@@ -520,6 +542,53 @@ model AccountNote {
 // en segundo plano (ver getCachedDialogs), y se mantiene sola gracias al
 // mismo refresco periodico y a los eventos en vivo que ya existian -no hace
 // falta ningun proceso ni comando aparte para mantenerla al dia.
+// Copia LOCAL (en la base de datos de la agencia, no de Telegram) del
+// historial de cada chat - la mejora que estaba pendiente desde que se
+// midió cuánto tardaba Telegram en responder "en vivo" cada vez que se
+// abría un chat (ver telegram/perfSamples.ts). Antes CADA apertura de un
+// chat, y CADA refresco de 20s, volvía a pedirle el historial entero a
+// Telegram por MTProto - con el servidor en otra región/continente que las
+// cuentas de Telegram y los trabajadores, ese viaje de ida y vuelta es lo
+// que se notaba como lentitud en TODAS las acciones, no solo en una. Ahora
+// el chat se guarda aquí la primera vez que se abre (y se completa su
+// historial antiguo poco a poco según se pide "Cargar más"), y a partir de
+// ahí CADA mensaje nuevo (de cualquier lado: el fan, un trabajador desde el
+// CRM, o la propia creadora desde su móvil) se guarda aquí en tiempo real
+// según llega (ver telegram/liveEvents.ts) - así que abrir un chat ya visto
+// se sirve desde esta tabla, sin tocar Telegram para nada. Los archivos en
+// sí (fotos/vídeos) NO se guardan aquí, solo sus metadatos (mediaType) - se
+// siguen pidiendo bajo demanda a Telegram como ya hacían thumb/media.
+model StoredMessage {
+  id                String    @id @default(cuid())
+  accountId         String
+  account           Account   @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  chatId            String
+  telegramMessageId Int
+  text              String
+  out               Boolean
+  date              DateTime?
+  mediaType         String? // "photo" | "video" | "audio" | "document" | ... (ver classifyGalleryMedia)
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt // se toca en cada edición (ver UpdateEditMessage en liveEvents.ts)
+
+  @@unique([accountId, chatId, telegramMessageId])
+  @@index([accountId, chatId, telegramMessageId])
+}
+
+// Por chat: si ya se tiene guardado TODO su historial hacia atrás (true), o
+// si todavía queda historial antiguo sin traer de Telegram la primera vez
+// que se le dé a "Cargar más" (false/sin fila = aún no se sabe). Sin esto no
+// habría forma de distinguir "no hay más mensajes antiguos" de "todavía no
+// se han pedido" solo mirando StoredMessage.
+model ChatSyncState {
+  accountId       String
+  chatId          String
+  fullyBackfilled Boolean  @default(false)
+  updatedAt       DateTime @updatedAt
+
+  @@id([accountId, chatId])
+}
+
 model CachedDialog {
   id                String    @id @default(cuid())
   accountId         String
@@ -644,18 +713,48 @@ model IncomingPayment {
 // así que el Dashboard solo mostrará actividad a partir de que esto se
 // desplegó (igual que "Acumulado anterior al CRM" ya hacía con las ventas).
 model ChatterMessageLog {
-  id              String   @id @default(cuid())
-  accountId       String
-  account         Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
-  chatId          String   // id de Telegram del chat/fan
-  chatTitle       String?  // nombre visible del fan en el momento de enviar
-  workerName      String   // "Chatter": nombre del trabajador logueado, o de la cuenta luxe si envía el dueño
-  message         String
-  responseSeconds Int?     // segundos desde el último mensaje del fan (si se pudo calcular), para "Tiempo de respuesta"
-  sentAt          DateTime @default(now())
+  id                String   @id @default(cuid())
+  accountId         String
+  account           Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  chatId            String   // id de Telegram del chat/fan
+  chatTitle         String?  // nombre visible del fan en el momento de enviar
+  workerName        String   // "Chatter": nombre del trabajador logueado, o de la cuenta luxe si envía el dueño
+  message           String
+  responseSeconds   Int?     // segundos desde el último mensaje del fan (si se pudo calcular), para "Tiempo de respuesta"
+  // Id del mensaje ya enviado en Telegram (lo que devuelve client.sendMessage).
+  // Con esto, GET .../messages puede decir "este mensaje concreto lo mandó
+  // Fulanito" buscando por (accountId, chatId, telegramMessageId) - sin esto
+  // solo sabíamos quién mandó CADA mensaje para el Dashboard de Informes, no
+  // para pintarlo en el propio chat. Null en filas antiguas (de antes de
+  // este campo) - esas no se podrán etiquetar en el chat, solo cuentan para
+  // las estadísticas de siempre.
+  telegramMessageId Int?
+  sentAt            DateTime @default(now())
 
   @@index([accountId, sentAt])
   @@index([workerName])
+  @@index([accountId, chatId, telegramMessageId])
+}
+
+// Registro de mensajes BORRADOS desde el CRM (Informes → Dashboard → Mensajes
+// borrados). Se guarda el contenido tal y como se envió, con quién lo borró y
+// quién lo había enviado, para poder revisarlo aunque ya no exista en Telegram.
+model DeletedMessageLog {
+  id                String    @id @default(cuid())
+  accountId         String
+  account           Account   @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  chatId            String
+  chatTitle         String?   // nombre del fan con el que hablaban
+  telegramMessageId Int
+  message           String    // texto tal cual se envió
+  mediaType         String?   // si llevaba foto/vídeo/etc.
+  sentBy            String?   // chatter que lo envió (si se sabe)
+  deletedBy         String    // chatter/dueño que lo borró
+  sentAt            DateTime? // cuándo se envió originalmente
+  deletedAt         DateTime  @default(now())
+
+  @@index([accountId, deletedAt])
+  @@index([deletedBy])
 }
 
 // "Nóminas" (Configuración → Nóminas): una fila por hoja de pago generada
@@ -774,19 +873,27 @@ model ContentNote {
 }
 
 // Registro de que un mensaje enviado a un fan concreto vino "de la bóveda"
-// (contenido de la modelo, enviado normal o "ver una vez"). Sirve solo para
-// poder marcar esos medios con la etiqueta "GRUPO" dentro de la Galería del
-// chat; no guarda el contenido en si, solo el id del mensaje resultante.
+// (contenido de la modelo, enviado normal o "ver una vez"). Sirve para
+// marcar esos medios con la etiqueta "GRUPO" dentro de la Galería del chat,
+// y tambien (via sourceMessageId) para que la bóveda pueda marcar "YA
+// ENVIADO" un contenido concreto cuando se abre con un fan concreto
+// delante - no guarda el contenido en si, solo los ids de los mensajes.
 model ContentSendLog {
   id                String   @id @default(cuid())
   accountId         String
   account           Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
   chatId            String   // chat del fan al que se envio
   telegramMessageId String   // id del mensaje ya en el chat del fan
+  // id del item de la bóveda (mensaje "portada" dentro del grupo de
+  // contenido) del que vino este envio - nullable porque los envios
+  // anteriores a esta funcionalidad no lo tienen. Se usa para saber, al
+  // abrir la bóveda con un chat concreto, que contenido ya se le mando.
+  sourceMessageId   String?
   createdAt         DateTime @default(now())
 
   @@unique([accountId, chatId, telegramMessageId])
   @@index([accountId, chatId])
+  @@index([accountId, chatId, sourceMessageId])
 }
 
 // Grupo restringido (solo modelo + un cliente concreto, con "restringir
@@ -1239,22 +1346,42 @@ model PromoAdminPrice {
 // agencias distintas dentro a la vez, cada una con su propio admin/precio
 // asignado, y esas asignaciones son justo lo que no se puede compartir.
 model PromoGroup {
-  id           String      @id @default(cuid())
+  id                 String            @id @default(cuid())
   // Sin relación de Prisma a propósito, mismo motivo que Account.agencyId.
-  agencyId     String      @default("legacy-agency")
-  chatId       String
-  title        String
-  isChannel    Boolean     @default(false)
-  memberCount  Int         @default(0)
-  promoAdminId String?
-  promoAdmin   PromoAdmin? @relation(fields: [promoAdminId], references: [id], onDelete: SetNull)
-  createdAt    DateTime    @default(now())
-  updatedAt    DateTime    @updatedAt
+  agencyId           String            @default("legacy-agency")
+  chatId             String
+  title              String
+  isChannel          Boolean           @default(false)
+  memberCount        Int               @default(0)
+  promoAdminId       String?
+  promoAdmin         PromoAdmin?       @relation(fields: [promoAdminId], references: [id], onDelete: SetNull)
+  // Carpeta propia del CRM para agrupar/organizar grupos de promoción como
+  // quiera la agencia (nada que ver con las carpetas de Telegram) - ver
+  // PromoGroupFolder.
+  promoGroupFolderId String?
+  promoGroupFolder   PromoGroupFolder? @relation(fields: [promoGroupFolderId], references: [id], onDelete: SetNull)
+  createdAt          DateTime          @default(now())
+  updatedAt          DateTime          @updatedAt
 
   accounts     PromoGroupAccount[]
   attributions PromoGroupFanAttribution[]
 
   @@unique([agencyId, chatId])
+}
+
+// Carpeta propia del CRM (no son las carpetas de Telegram) para clasificar
+// grupos de promoción como quiera la agencia, aparte del admin - p.ej. por
+// zona, idioma o tipo de contenido. Un grupo tiene como mucho una carpeta.
+model PromoGroupFolder {
+  id        String   @id @default(cuid())
+  // Sin relación de Prisma a propósito, mismo motivo que Account.agencyId.
+  agencyId  String   @default("legacy-agency")
+  name      String
+  createdAt DateTime @default(now())
+
+  groups PromoGroup[]
+
+  @@unique([agencyId, name])
 }
 
 // Qué creadoras (cuentas) están dentro de este grupo - se rellena/actualiza
@@ -1335,4 +1462,22 @@ model JapOrder {
   updatedAt    DateTime @updatedAt
 
   @@index([accountId])
+}
+
+// Lo que se manda desde el formulario "¿No lo encuentras? Escríbenos" del
+// apartado Ayuda (dueño y trabajadores, cualquier rol). Solo queda guardado
+// aquí - de momento no hay bandeja en el panel para leerlo, hay que mirarlo
+// a mano en la base de datos (o con `railway connect postgres`) hasta que
+// se pida una vista para ello.
+model HelpRequest {
+  id          String   @id @default(cuid())
+  // Sin relación de Prisma a propósito, mismo motivo que Account.agencyId.
+  agencyId    String   @default("legacy-agency")
+  kind        String // "ayuda" (algo no funciona) | "sugerencia" (idea de mejora)
+  message     String
+  authorName  String // nombre del dueño o del trabajador que escribe, tal cual se ve en el panel
+  authorEmail String? // email del trabajador si lo escribió uno (el dueño no tiene uno fijo en sesión)
+  createdAt   DateTime @default(now())
+
+  @@index([agencyId])
 }

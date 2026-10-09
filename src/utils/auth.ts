@@ -144,22 +144,43 @@ export interface AuthedWorker {
  * null si no hay cookie, el token no es válido/ha caducado, o el trabajador
  * ya no existe/está desactivado -nunca lanza, para que cualquier ruta pueda
  * llamarla sin tener que envolverla en try/catch-. */
+// Se llama a esto varias veces por cada petición (el guardia general de
+// index.ts, agencyContext.ts, requireSectionAccess y a veces el propio
+// handler de la ruta) - sin memoizar, cada una de esas llamadas repetía el
+// verify del JWT + una consulta a prisma.worker POR SEPARADO para la MISMA
+// petición. Con el sondeo frecuente de Mensajes/Mensajes Pro (insignias,
+// lista de diálogos, polling del chat cada 20s) multiplicado por cada
+// trabajador conectado, eso eran varias consultas a la base de datos de
+// sobra en cada petición - una de las cosas que hacían el panel entero
+// lento. Guardar el resultado en el propio `request` es seguro: la
+// identidad del trabajador no cambia a media petición, y cada petición
+// HTTP nueva tiene su propio objeto `request`, así que no hay forma de que
+// esto filtre datos de una petición a otra.
 export async function getWorkerFromRequest(request: FastifyRequest): Promise<AuthedWorker | null> {
-  const token = (request as any).cookies?.[WORKER_COOKIE];
-  if (!token) return null;
-  let payload: WorkerTokenPayload;
-  try {
-    payload = jwt.verify(token, getJwtSecret()) as WorkerTokenPayload;
-  } catch {
-    return null;
-  }
-  try {
-    const worker = await prisma.worker.findUnique({ where: { id: payload.workerId } });
-    if (!worker || !worker.active) return null;
-    return { id: worker.id, name: worker.name, email: worker.email, role: worker.role, active: worker.active, agencyId: worker.agencyId, canUseBrowser: worker.canUseBrowser, readOnly: worker.readOnly };
-  } catch {
-    return null;
-  }
+  const cached = (request as any)._resolvedWorker;
+  if (cached !== undefined) return cached as AuthedWorker | null;
+
+  const resolve = async (): Promise<AuthedWorker | null> => {
+    const token = (request as any).cookies?.[WORKER_COOKIE];
+    if (!token) return null;
+    let payload: WorkerTokenPayload;
+    try {
+      payload = jwt.verify(token, getJwtSecret()) as WorkerTokenPayload;
+    } catch {
+      return null;
+    }
+    try {
+      const worker = await prisma.worker.findUnique({ where: { id: payload.workerId } });
+      if (!worker || !worker.active) return null;
+      return { id: worker.id, name: worker.name, email: worker.email, role: worker.role, active: worker.active, agencyId: worker.agencyId, canUseBrowser: worker.canUseBrowser, readOnly: worker.readOnly };
+    } catch {
+      return null;
+    }
+  };
+
+  const result = await resolve();
+  (request as any)._resolvedWorker = result;
+  return result;
 }
 
 /** Fastify preHandler: solo el súper-admin (PANEL_USERNAME/PANEL_PASSWORD de
@@ -229,6 +250,34 @@ export function requireSectionAccess(section: "mensajes" | "sfs" | "mensajes-pro
     });
     if (!allowed) {
       reply.code(403).send({ error: "No tienes acceso a este apartado para esta cuenta." });
+    }
+  };
+}
+
+/** "Contenido de la modelo" (la bóveda del grupo con temas de Telegram,
+ * ver contentLibrary.ts): el botón de carpeta 📁 vive dentro del MISMO
+ * composer de chat que usan tanto Mensajes normal como SFS → Chat (ver
+ * renderMensajesView con sfsMode en app.js), así que esto no es "SFS" -
+ * cualquier Chatter con acceso a Mensajes de esa cuenta tiene que poder
+ * abrirla para mandar contenido al registrar una venta, sin que haga falta
+ * ser Team líder. Antes se reutilizaba requireSectionAccess("sfs") a
+ * secas, así que un Chatter con Mensajes pero sin SFS se encontraba el
+ * error "SFS es solo para Team líder" nada más pulsar la carpeta - este
+ * chequeo deja pasar con CUALQUIERA de los dos permisos concedidos.
+ */
+export function requireContentLibraryAccess() {
+  return async function (request: FastifyRequest, reply: any) {
+    const worker = await getWorkerFromRequest(request);
+    (request as any).worker = worker;
+    if (!worker) return; // sin sesion de trabajador (el dueño/jefe): sin restriccion
+    const params = request.params as { id?: string };
+    const accountId = params?.id;
+    if (!accountId) return;
+    const allowed = await prisma.workerPermission.findFirst({
+      where: { workerId: worker.id, accountId, section: { in: ["mensajes", "sfs"] } },
+    });
+    if (!allowed) {
+      reply.code(403).send({ error: "No tienes acceso al contenido de esta cuenta." });
     }
   };
 }

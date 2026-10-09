@@ -39,6 +39,7 @@ const modelPayroll_1 = require("./api/modelPayroll");
 const performance_1 = require("./api/performance");
 const security_1 = require("./api/security");
 const clock_1 = require("./api/clock");
+const help_1 = require("./api/help");
 const paymentAccounts_1 = require("./api/paymentAccounts");
 const paymentSync_1 = require("./payments/paymentSync");
 const auth_2 = require("./utils/auth");
@@ -512,7 +513,7 @@ async function main() {
             // normal) tampoco puede seguir usando ninguna ruta desde un navegador
             // normal a partir de aquí.
             if (!worker.canUseBrowser && !(0, auth_2.isDesktopAppRequest)(request)) {
-                reply.code(403).send({ error: "Esta cuenta solo puede entrar desde la aplicación de escritorio de LUREQO CRM." });
+                reply.code(403).send({ error: "Esta cuenta solo puede entrar desde la aplicación de escritorio de LUREQO." });
                 return;
             }
             // "Solo lectura" (Equipo → Permisos, Worker.readOnly): puede ver todo
@@ -538,8 +539,6 @@ async function main() {
         // quien decide mandar a /login al ver este 401 (ver app.js, init()).
         reply.code(401).send({ error: "Autenticación requerida" });
     });
-    app.get("/health", async (_request, reply) => reply.send({ ok: true, service: "luxe-crm" }));
-    app.get("/", async (_request, reply) => reply.sendFile("index.html"));
     // Panel web (frontend estatico): se sirve desde el mismo servicio/dominio
     // que la API, asi que no hace falta CORS ni un segundo servicio en Railway.
     // app.js/style.css cambian en casi cada deploy; sin esto el navegador (sobre
@@ -557,9 +556,25 @@ async function main() {
             }
         },
     });
+    // Web de guías (website/, Next.js export estático) servida en /crm desde
+    // este mismo servicio/dominio - así se puede mandar un enlace público tipo
+    // https://luxefan.es/crm sin depender de Vercel ni de un subdominio aparte.
+    // Se genera con `npm run build` dentro de website/ (output: "export",
+    // basePath: "/crm") y se copia tal cual a backend/public-crm antes de cada
+    // deploy que la toque.
+    await app.register(static_1.default, {
+        root: path_1.default.join(__dirname, "..", "public-crm"),
+        prefix: "/crm",
+        decorateReply: false,
+        redirect: true,
+    });
     app.setNotFoundHandler((request, reply) => {
         if (request.raw.url?.startsWith("/api/")) {
             reply.code(404).send({ error: "not found" });
+            return;
+        }
+        if (request.raw.url?.startsWith("/crm")) {
+            reply.code(404).send("Página no encontrada");
             return;
         }
         reply.sendFile("index.html");
@@ -664,6 +679,7 @@ async function main() {
     await (0, performance_1.registerPerformanceRoutes)(app);
     await (0, security_1.registerSecurityRoutes)(app);
     await (0, clock_1.registerClockRoutes)(app);
+    await (0, help_1.registerHelpRoutes)(app);
     await (0, paymentAccounts_1.registerPaymentAccountsRoutes)(app);
     await (0, agencies_1.registerAgencyRoutes)(app);
     // Multi-agencia: se siembra ANTES de aceptar peticiones (a diferencia de

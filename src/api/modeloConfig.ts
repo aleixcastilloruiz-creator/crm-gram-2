@@ -71,6 +71,11 @@ export async function registerModeloConfigRoutes(app: FastifyInstance) {
     return { ok: true };
   });
 
+  // Nota: la lista de carpetas REALES de Telegram de esta cuenta (para
+  // poder elegirlas con checkboxes) ya la sirve GET
+  // /api/accounts/:id/telegram-folders, registrada en telegramFolders.ts -
+  // no se duplica aquí.
+
   // --- Carpetas de Telegram: sincronizar automáticamente ---
   app.get("/api/accounts/:id/folder-sync", async (request) => {
     const { id } = request.params as { id: string };

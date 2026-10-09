@@ -2,18 +2,31 @@ import { FastifyInstance } from "fastify";
 import { Api, utils as telegramUtils } from "telegram";
 import { generateRandomBigInt } from "telegram/Helpers";
 import { prisma } from "../utils/prisma";
-import { getAccountClient, invalidateAccountClient } from "../telegram/connectionPool";
+import { getAccountClient, invalidateAccountClient, isShadowModeEnabled } from "../telegram/connectionPool";
 import { resolveDialogEntity, resolveEntityById, getLastDialogStats, usernameOf } from "../telegram/dialogs";
-import { getCachedDialogs, markDialogRead, markDialogsStale } from "../telegram/dialogsCache";
+import { getCachedDialogs, markDialogRead, markDialogsStale, getCachedDialogTitle, shouldNotifyChat, peekCachedDialogs, touchDialogFromLiveMessage } from "../telegram/dialogsCache";
 import { listAccountFolders, addChatToFolderByTitle } from "../telegram/folders";
-import { subscribeToAccountEvents } from "../telegram/liveEvents";
+import { subscribeToAccountEvents, getOutboxReadMaxId } from "../telegram/liveEvents";
 import { countryFromPhone } from "../telegram/phoneCountry";
 import { estimateRegistrationDate } from "../telegram/idRegistrationEstimate";
 import { getCachedMedia, setCachedMedia } from "../telegram/mediaCache";
 import { getCachedFullMedia, setCachedFullMedia } from "../telegram/fullMediaCache";
 import { notifySaleToGroups } from "../whatsapp/waNotify";
-import { getOwnerSessionFromRequest } from "../utils/auth";
+import { getOwnerSessionFromRequest, getWorkerFromRequest } from "../utils/auth";
 import { detectPaymentInMessage } from "../utils/paymentDetector";
+import { agencyIdFromRequest } from "../utils/agencyContext";
+import { recordPerfSample, getPerfStats } from "../telegram/perfSamples";
+import { classifyGalleryMedia } from "../telegram/mediaKind";
+import {
+  hasAnyStoredMessages,
+  getStoredMessagesPage,
+  isFullyBackfilled,
+  markFullyBackfilled,
+  countOlderStored,
+  persistMessagesBulk,
+  persistMessage,
+  deleteStoredMessage,
+} from "../telegram/messageStore";
 // Sin @types propios: se usa via require, la libreria en si es JS puro (no
 // necesita compilar nada nativo en Railway).
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -201,6 +214,7 @@ async function logChatterMessage(params: {
   workerName: string;
   message: string;
   lastFanMessageAt?: string | null;
+  telegramMessageId?: number | null;
 }): Promise<void> {
   try {
     let responseSeconds: number | null = null;
@@ -218,6 +232,7 @@ async function logChatterMessage(params: {
         workerName: params.workerName,
         message: params.message.slice(0, 500),
         responseSeconds,
+        telegramMessageId: params.telegramMessageId ?? null,
       },
     });
   } catch {
@@ -302,65 +317,6 @@ function sendBufferWithRange(request: any, reply: any, buf: Buffer, contentType:
   return reply.send(buf);
 }
 
-function classifyGalleryMedia(media: any): "photo" | "video" | "audio" | "other" {
-  if (!media) return "other";
-  if (media.className === "MessageMediaPhoto") {
-    // Una foto "vacia" (className "PhotoEmpty") pasa cuando el contenido ya
-    // caducó (p.ej. una foto de "ver una vez" ya vista) - Telegram no tiene
-    // nada que descargar para ella, así que mostrar un hueco de miniatura
-    // solo daria otro error de carga. Se trata como "other" para que caiga
-    // en el enlace generico en vez de un hueco roto.
-    if (media.photo?.className === "PhotoEmpty") return "other";
-    return "photo";
-  }
-  if (media.className === "MessageMediaDocument" && media.document) {
-    const attrs: any[] = media.document.attributes || [];
-    if (attrs.some((a) => a.className === "DocumentAttributeVideo")) return "video";
-    if (attrs.some((a) => a.className === "DocumentAttributeAudio")) return "audio";
-    const mime: string = media.document.mimeType || "";
-    if (mime.startsWith("video/")) return "video";
-    if (mime.startsWith("audio/")) return "audio";
-    if (mime.startsWith("image/")) return "photo";
-    // Una foto mandada "como archivo" (sin comprimir, para no perder
-    // calidad) llega como MessageMediaDocument, no como MessageMediaPhoto -
-    // a veces con un mimeType generico (o incluso vacío) que no empieza por
-    // "image/", así que sin esto se colaba como "other" (enlace de
-    // descarga) aunque fuera una foto real. Telegram siempre le añade el
-    // atributo DocumentAttributeImageSize (ancho/alto) a cualquier imagen,
-    // la usen para comprimirla o no, así que es una señal fiable de que es
-    // una imagen aunque el mimeType no lo diga.
-    if (attrs.some((a) => a.className === "DocumentAttributeImageSize")) return "photo";
-    // Animación (GIF reenviado desde fuera de Telegram, "Enviar sin sonido")
-    // - Telegram la guarda como documento con DocumentAttributeAnimated, casi
-    // siempre con mimeType "video/mp4" (ya cubierto arriba), pero por si
-    // acaso llega con otro mime se trata igual como vídeo.
-    if (attrs.some((a) => a.className === "DocumentAttributeAnimated")) return "video";
-  }
-  // Cuando alguien envia (o reenvía) un enlace con vista previa - un link de
-  // Instagram/Twitter/una noticia con imagen, etc. - Telegram NO lo guarda
-  // como MessageMediaPhoto sino como MessageMediaWebPage con un `photo` (o a
-  // veces un `document`, p.ej. un GIF/video) colgando de `webpage`. En la
-  // app de Telegram esto se ve exactamente igual que una foto normal dentro
-  // de la burbuja del mensaje, pero aqui antes caia siempre en "other" (el
-  // enlace generico "Ver archivo adjunto") porque solo se miraba
-  // MessageMediaPhoto/MessageMediaDocument sueltos - este es el motivo mas
-  // habitual de que una "foto" real se viera como enlace roto en vez de
-  // miniatura. client.downloadMedia() de GramJS ya sabe descargar el
-  // photo/document de dentro de un webpage sin cambios adicionales, con solo
-  // pasarle el message/media tal cual.
-  if (media.className === "MessageMediaWebPage" && media.webpage) {
-    const webpage = media.webpage;
-    if (webpage.photo && webpage.photo.className !== "PhotoEmpty") return "photo";
-    if (webpage.document) {
-      const attrs: any[] = webpage.document.attributes || [];
-      if (attrs.some((a: any) => a.className === "DocumentAttributeVideo")) return "video";
-      const mime: string = webpage.document.mimeType || "";
-      if (mime.startsWith("video/")) return "video";
-      if (mime.startsWith("image/")) return "photo";
-    }
-  }
-  return "other";
-}
 
 // GramJS a veces "tiene éxito" (no lanza excepción) pero devuelve un Buffer
 // vacío (0 bytes) - p.ej. cuando el tamaño de miniatura pedido no existe de
@@ -424,10 +380,33 @@ function escapeRegExp(s: string): string {
 // Cache corta: consultar las carpetas de Telegram en cada apertura de
 // Mensajes seria un viaje de mas sin necesidad, ya que casi nunca cambian.
 interface ExtraFoldersCacheEntry { chatIds: Set<string>; loadedAt: number }
+const dialogsBgRevalidate = new Map<string, number>();
 const extraFoldersCache = new Map<string, ExtraFoldersCacheEntry>();
 const EXTRA_FOLDERS_TTL_MS = 2 * 60 * 1000;
 
-async function resolveMessageFolderChatIds(client: any, foldersJson: string): Promise<Set<string> | undefined> {
+// GET /dialogs (y /dialogs/search-global) pedían las carpetas de Telegram
+// (listAccountFolders -> GetDialogFilters) HASTA 3 VECES por carga: una
+// para "Mostrar también en Mensajes" (extraMessageFolders), otra para
+// "Ocultar de Mensajes" (excludedMessageFolders) y otra para el mapa de
+// etiquetas (getChatFoldersMap) - las tres piden exactamente lo mismo, solo
+// que cada una tenía su propia cache por separado (por foldersJson la de
+// extra/excluded, por accountId la del mapa), así que en cualquier carga en
+// frío (cada ~2 min, o tras un despliegue) se disparaban las 3 a la vez
+// contra Telegram para el mismo dato. Esta cache compartida (clave:
+// accountId, TTL corto) hace que solo la PRIMERA de las tres llame de
+// verdad a Telegram; las otras dos reutilizan el mismo resultado.
+interface RawFoldersCacheEntry { folders: Awaited<ReturnType<typeof listAccountFolders>>; loadedAt: number }
+const rawFoldersCache = new Map<string, RawFoldersCacheEntry>();
+const RAW_FOLDERS_TTL_MS = 60 * 1000;
+async function getAccountFoldersCached(client: any, accountId: string) {
+  const cached = rawFoldersCache.get(accountId);
+  if (cached && Date.now() - cached.loadedAt < RAW_FOLDERS_TTL_MS) return cached.folders;
+  const folders = await listAccountFolders(client);
+  rawFoldersCache.set(accountId, { folders, loadedAt: Date.now() });
+  return folders;
+}
+
+async function resolveMessageFolderChatIds(client: any, foldersJson: string, accountId?: string): Promise<Set<string> | undefined> {
   let folderTitles: string[] = [];
   try {
     folderTitles = JSON.parse(foldersJson || "[]");
@@ -441,7 +420,7 @@ async function resolveMessageFolderChatIds(client: any, foldersJson: string): Pr
   if (cached && Date.now() - cached.loadedAt < EXTRA_FOLDERS_TTL_MS) return cached.chatIds;
 
   try {
-    const folders = await listAccountFolders(client);
+    const folders = accountId ? await getAccountFoldersCached(client, accountId) : await listAccountFolders(client);
     const wanted = new Set(folderTitles.map((t) => t.toLowerCase()));
     const chatIds = new Set<string>();
     for (const f of folders) {
@@ -451,7 +430,13 @@ async function resolveMessageFolderChatIds(client: any, foldersJson: string): Pr
     }
     extraFoldersCache.set(cacheKey, { chatIds, loadedAt: Date.now() });
     return chatIds;
-  } catch {
+  } catch (err) {
+    // Si esto falló por timeout (ver withTimeout en listAccountFolders), lo
+    // más probable es que la conexión esté zombi - la descartamos YA en vez
+    // de esperar al barrido periódico (hasta 2 min), para que la SIGUIENTE
+    // carga de Mensajes ya use una conexión sana en vez de volver a chocar
+    // con la misma rota.
+    if (accountId && shouldInvalidateConnection(err)) invalidateAccountClient(accountId);
     return cached?.chatIds; // si falla, seguimos con lo que hubiera en cache (aunque este caducado)
   }
 }
@@ -473,7 +458,7 @@ async function getChatFoldersMap(client: any, accountId: string): Promise<Map<st
   const cached = chatFoldersCache.get(accountId);
   if (cached && Date.now() - cached.loadedAt < CHAT_FOLDERS_TTL_MS) return cached.map;
   try {
-    const folders = await listAccountFolders(client);
+    const folders = await getAccountFoldersCached(client, accountId);
     const map = new Map<string, string[]>();
     for (const f of folders) {
       for (const chatId of f.chatIds) {
@@ -484,7 +469,11 @@ async function getChatFoldersMap(client: any, accountId: string): Promise<Map<st
     }
     chatFoldersCache.set(accountId, { map, loadedAt: Date.now() });
     return map;
-  } catch {
+  } catch (err) {
+    // Misma lógica que en resolveMessageFolderChatIds: un timeout aquí casi
+    // siempre es una conexión zombi - se descarta ya en vez de esperar al
+    // barrido periódico.
+    if (shouldInvalidateConnection(err)) invalidateAccountClient(accountId);
     return cached?.map || new Map(); // si falla, mejor sin etiquetas que romper la carga de Mensajes
   }
 }
@@ -565,19 +554,78 @@ export function extractSentMessageIds(result: any): string[] {
  * desde el panel, y llevar notas por fan y una nota general de la cuenta
  * (modelo), igual que en el panel de referencia.
  */
+// Avatares: (1) "sin foto" se recuerda un rato, para no volver a pedirle a
+// Telegram lo mismo cada vez que se pinta la lista (antes cada carga de
+// Mensajes disparaba decenas de descargas que acababan en 404 y competían
+// con la carga de los mensajes por la MISMA conexión de Telegram); (2) como
+// mucho unas pocas descargas de foto a la vez por cuenta.
+const NO_AVATAR_TTL_MS = 30 * 60 * 1000;
+const noAvatarUntil = new Map<string, number>();
+const AVATAR_MAX_CONCURRENT = 3;
+const avatarActive = new Map<string, number>();
+const avatarWaiters = new Map<string, (() => void)[]>();
+async function withAvatarSlot<T>(accountId: string, fn: () => Promise<T>): Promise<T> {
+  while ((avatarActive.get(accountId) || 0) >= AVATAR_MAX_CONCURRENT) {
+    await new Promise<void>((resolve) => {
+      const q = avatarWaiters.get(accountId) || [];
+      q.push(resolve);
+      avatarWaiters.set(accountId, q);
+    });
+  }
+  avatarActive.set(accountId, (avatarActive.get(accountId) || 0) + 1);
+  try {
+    return await fn();
+  } finally {
+    avatarActive.set(accountId, (avatarActive.get(accountId) || 1) - 1);
+    const q = avatarWaiters.get(accountId);
+    const next = q?.shift();
+    if (next) next();
+  }
+}
+function noAvatarReply(reply: any) {
+  reply.header("Cache-Control", "private, max-age=1800");
+  return reply.code(404).send();
+}
+
 export async function registerMessagesRoutes(app: FastifyInstance) {
+  // Panel de medicion temporal (ver telegram/perfSamples.ts): cuanto esta
+  // tardando HOY, de verdad, cada llamada a Telegram para abrir un chat
+  // (getMessages) y para enviar un mensaje (sendMessage) - el "antes" que
+  // hace falta tener para decidir con datos (no a ojo) si merece la pena
+  // construir un cache local de mensajes. Sin `:id` en la URL (es un
+  // resumen de TODAS las cuentas de la agencia), asi que se filtra aqui
+  // mismo por agencia en vez de depender del guardia general de index.ts.
+  app.get("/api/perf/messages", async (request) => {
+    const agencyId = await agencyIdFromRequest(request);
+    const accounts = await prisma.account.findMany({ where: { agencyId }, select: { id: true } });
+    return getPerfStats(new Set(accounts.map((a) => a.id)));
+  });
+
   app.get("/api/accounts/:id/dialogs", async (request, reply) => {
     const { id } = request.params as { id: string };
     const q = request.query as { search?: string; force?: string };
     const forceRefresh = q.force === "1" || q.force === "true";
     const account = await prisma.account.findUniqueOrThrow({ where: { id } });
     try {
-      const client = await getAccountClient(account);
+      // CAMINO RAPIDO: si ya hay lista guardada (memoria o base de datos), se
+      // responde al instante con ella y con las carpetas ya conocidas, SIN
+      // esperar a la conexion con Telegram; la actualizacion real se hace en
+      // segundo plano (como mucho una vez cada 20s por cuenta).
+      // Un chatter solo puede ver ciertas carpetas: sin el mapa de carpetas ya
+      // cargado no se puede filtrar bien, asi que en ese caso no hay atajo.
+      const canFast = !forceRefresh && (!isRestrictedWorker(request) || !!chatFoldersCache.get(id));
+      const fastDialogs = canFast ? await peekCachedDialogs(id) : null;
+      let client: any = null;
+      if (!fastDialogs) client = await getAccountClient(account);
+      const staleFolders = (json: string) => {
+        try { if (JSON.parse(json || "[]").length === 0) return undefined; } catch { return undefined; }
+        return extraFoldersCache.get(json)?.chatIds;
+      };
       const [folderExtraChatIds, excludedChatIds, restrictedGroupsRaw, chatFoldersMap, hiddenRows] = await Promise.all([
-        resolveMessageFolderChatIds(client, account.extraMessageFolders),
-        resolveMessageFolderChatIds(client, account.excludedMessageFolders),
+        fastDialogs ? Promise.resolve(staleFolders(account.extraMessageFolders)) : resolveMessageFolderChatIds(client, account.extraMessageFolders, id),
+        fastDialogs ? Promise.resolve(staleFolders(account.excludedMessageFolders)) : resolveMessageFolderChatIds(client, account.excludedMessageFolders, id),
         prisma.clientRestrictedGroup.findMany({ where: { accountId: id }, select: { groupChatId: true, groupTitle: true } }),
-        getChatFoldersMap(client, id),
+        fastDialogs ? Promise.resolve(chatFoldersCache.get(id)?.map || new Map<string, string[]>()) : getChatFoldersMap(client, id),
         prisma.hiddenDialog.findMany({ where: { accountId: id }, select: { chatId: true } }),
       ]);
       // "Eliminar chat" (menú ⋮, solo admin): una vez oculto, no lo ve NADIE
@@ -620,7 +668,7 @@ export async function registerMessagesRoutes(app: FastifyInstance) {
           .catch(() => {});
       }
       const restrictedGroups = restrictedGroupsRaw.filter((g) => !badGroupChatIds.has(g.groupChatId));
-      runRestrictedGroupSizeSweepThrottled(client, id, account.label, restrictedGroups);
+      if (client) runRestrictedGroupSizeSweepThrottled(client, id, account.label, restrictedGroups);
 
       // "Mensajes" es el chat con fans, no el Telegram entero de la cuenta:
       // solo chats privados + los grupos restringidos de cliente (título
@@ -642,7 +690,27 @@ export async function registerMessagesRoutes(app: FastifyInstance) {
       // puede tardar de verdad en la primera carga en frío, y cortarla antes
       // de tiempo es peor que esperar un poco más - eso convertiría un "va
       // lento" en un "ya no va" de golpe.
-      let dialogs = await withTimeout(getCachedDialogs(client, id, extraChatIds, forceRefresh), 120_000, "cargando tus conversaciones");
+      let dialogs: Awaited<ReturnType<typeof getCachedDialogs>>;
+      if (fastDialogs) {
+        dialogs = fastDialogs;
+        const last = dialogsBgRevalidate.get(id) || 0;
+        if (Date.now() - last > 20_000) {
+          dialogsBgRevalidate.set(id, Date.now());
+          getAccountClient(account)
+            .then(async (c) => {
+              await Promise.all([
+                getCachedDialogs(c, id, extraChatIds, false),
+                resolveMessageFolderChatIds(c, account.extraMessageFolders, id),
+                resolveMessageFolderChatIds(c, account.excludedMessageFolders, id),
+                getChatFoldersMap(c, id),
+              ]);
+              runRestrictedGroupSizeSweepThrottled(c, id, account.label, restrictedGroups);
+            })
+            .catch(() => {});
+        }
+      } else {
+        dialogs = await withTimeout(getCachedDialogs(client, id, extraChatIds, forceRefresh), 120_000, "cargando tus conversaciones");
+      }
       // Diagnostico: si algun dia una cuenta vuelve a devolver muchos menos
       // chats de los que debería, esto dice en los logs de Railway si el
       // problema viene de Telegram (rawCount ya bajo) o de nuestros propios
@@ -799,6 +867,13 @@ export async function registerMessagesRoutes(app: FastifyInstance) {
     const query = (q.q || "").trim();
     if (!query) return { results: [] };
     const account = await prisma.account.findUniqueOrThrow({ where: { id } });
+    // Resultados por NOMBRE del fan (notas del CRM + chats a los que ya se ha
+    // escrito desde aquí): la lista de Mensajes solo trae los ~1000 chats más
+    // recientes de Telegram, y SearchGlobal busca dentro del TEXTO de los
+    // mensajes, no en los nombres - así un fan antiguo buscado por su nombre
+    // salía como "Sin resultados". Esto sale de nuestra base de datos, es
+    // instantáneo y no depende de Telegram.
+    let nameResults: any[] = [];
     try {
       const client = await getAccountClient(account);
       // Mismas excepciones que la lista de "Mensajes" (ver el filtro de
@@ -809,13 +884,51 @@ export async function registerMessagesRoutes(app: FastifyInstance) {
       // busqueda a Telegram para no alargar mas la espera del usuario.
       const [restrictedGroupsRaw, folderExtraChatIds, hiddenRows, chatFoldersMap] = await Promise.all([
         prisma.clientRestrictedGroup.findMany({ where: { accountId: id }, select: { groupChatId: true } }),
-        resolveMessageFolderChatIds(client, account.extraMessageFolders),
+        resolveMessageFolderChatIds(client, account.extraMessageFolders, id),
         prisma.hiddenDialog.findMany({ where: { accountId: id }, select: { chatId: true } }),
         getChatFoldersMap(client, id),
       ]);
       const allowedGroupChatIds = new Set<string>(folderExtraChatIds || []);
       for (const g of restrictedGroupsRaw) allowedGroupChatIds.add(g.groupChatId);
       const hiddenChatIds = new Set(hiddenRows.map((r) => r.chatId));
+      const restrictedSearch = isRestrictedWorker(request);
+      const chatterAllowedFolders = restrictedSearch ? buildChatterAllowedFolderTitles(account) : null;
+      const seenChats = new Set<string>();
+      const results: any[] = [];
+      try {
+        const [noteRows, logRows] = await Promise.all([
+          prisma.fanNote.findMany({
+            where: { accountId: id, chatTitle: { contains: query, mode: "insensitive" } },
+            select: { chatId: true, chatTitle: true, updatedAt: true },
+            orderBy: { updatedAt: "desc" },
+            take: 30,
+          }),
+          prisma.chatterMessageLog.findMany({
+            where: { accountId: id, chatTitle: { contains: query, mode: "insensitive" } },
+            select: { chatId: true, chatTitle: true, message: true, sentAt: true },
+            orderBy: { sentAt: "desc" },
+            take: 60,
+          }),
+        ]);
+        const byChat = new Map<string, any>();
+        for (const l of logRows) {
+          if (!byChat.has(l.chatId)) {
+            byChat.set(l.chatId, { chatId: l.chatId, title: l.chatTitle || l.chatId, kind: "user", preview: String(l.message || "").slice(0, 140), date: l.sentAt.toISOString() });
+          }
+        }
+        for (const n of noteRows) {
+          if (!byChat.has(n.chatId)) {
+            byChat.set(n.chatId, { chatId: n.chatId, title: n.chatTitle || n.chatId, kind: "user", preview: "", date: n.updatedAt.toISOString() });
+          }
+        }
+        for (const r of byChat.values()) {
+          if (hiddenChatIds.has(r.chatId)) continue;
+          if (chatterAllowedFolders && !isFolderVisibleToChatter(chatFoldersMap.get(r.chatId) || [], chatterAllowedFolders)) continue;
+          nameResults.push(r);
+        }
+      } catch {
+        // la búsqueda por nombre es un extra: si falla, siguen los resultados de Telegram
+      }
       // Antes esta llamada no tenía withTimeout, a diferencia de TODAS las
       // demás de este archivo - si la conexión de la cuenta estaba colgada
       // (zombi, ver connectionPool.ts) o simplemente saturada por el
@@ -849,10 +962,6 @@ export async function registerMessagesRoutes(app: FastifyInstance) {
       const chatsById = new Map<string, any>((result?.chats || []).map((c: any) => [String(c.id), c]));
       const usersById = new Map<string, any>((result?.users || []).map((u: any) => [String(u.id), u]));
 
-      const restrictedSearch = isRestrictedWorker(request);
-      const chatterAllowedFolders = restrictedSearch ? buildChatterAllowedFolderTitles(account) : null;
-      const seenChats = new Set<string>();
-      const results: any[] = [];
       for (const m of messages) {
         const peer = m.peerId;
         if (!peer) continue;
@@ -904,10 +1013,18 @@ export async function registerMessagesRoutes(app: FastifyInstance) {
           date: m.date ? new Date(m.date * 1000).toISOString() : null,
         });
       }
+      for (const r of nameResults) {
+        if (seenChats.has(r.chatId)) continue;
+        seenChats.add(r.chatId);
+        results.push(r);
+      }
       return { results };
     } catch (err: any) {
       request.log.error(err);
       if (shouldInvalidateConnection(err)) invalidateAccountClient(id);
+      // Si Telegram no contestó pero ya tenemos resultados por nombre, se
+      // devuelven esos en vez de un error.
+      if (nameResults.length > 0) return { results: nameResults };
       return reply.code(502).send({ error: "No se pudo buscar en todo Telegram." });
     }
   });
@@ -922,36 +1039,157 @@ export async function registerMessagesRoutes(app: FastifyInstance) {
     }
     const account = await prisma.account.findUniqueOrThrow({ where: { id } });
     try {
-      const client = await getAccountClient(account);
-      const entity = await withTimeout(resolveDialogEntity(client, id, chatId), 35_000, "abriendo la conversación");
+      // La conexión con Telegram y la entidad del chat se piden SOLO si hacen
+      // falta (primera vez que se ve el chat, historial antiguo, o marcar
+      // leído). Antes se esperaban SIEMPRE al principio, así que incluso un
+      // chat ya guardado en la base de datos tardaba lo que tardase Telegram
+      // en resolverlo (lentísimo tras un despliegue o con la conexión fría).
+      let tgPromise: Promise<{ client: any; entity: any }> | null = null;
+      const getTg = () => {
+        if (!tgPromise) {
+          tgPromise = (async () => {
+            const client = await getAccountClient(account);
+            const entity = await withTimeout(resolveDialogEntity(client, id, chatId), 35_000, "abriendo la conversación");
+            return { client, entity };
+          })();
+          tgPromise.catch(() => {}); // evita "unhandled rejection" si nadie llega a esperarla
+        }
+        return tgPromise;
+      };
       const limit = Math.min(Number(q.limit) || 60, 200);
-      const raw = await withTimeout(
-        client.getMessages(entity, {
-          limit,
-          offsetId: q.offsetId ? Number(q.offsetId) : undefined,
-        }),
-        35_000,
-        "cargando los mensajes"
-      );
-      const messages = (raw as Api.Message[])
-        .filter((m) => m.message || m.media)
-        .map((m) => {
-          const mediaType = m.media ? classifyGalleryMedia(m.media) : null;
-          return {
+      const offsetId = q.offsetId ? Number(q.offsetId) : undefined;
+
+      // Copia local (ver telegram/messageStore.ts): un chat que ya se haya
+      // abierto antes (o cuyo tramo pedido ya se trajo con "Cargar más")
+      // se sirve ENTERO desde la base de datos de la agencia, sin tocar
+      // Telegram para nada - cada mensaje nuevo ya se fue guardando solo,
+      // en tiempo real, según llegaba (ver telegram/liveEvents.ts). Solo se
+      // habla con Telegram aquí la PRIMERA vez que se ve un chat, o para
+      // completar historial antiguo que todavía no se había pedido nunca.
+      let baseMessages: { id: number; text: string; out: boolean; date: string | null; mediaType: string | null }[];
+      let hasMore: boolean;
+
+      // Las tres consultas a la base de datos en paralelo (antes una detrás de
+      // otra): si el chat no estaba guardado, las dos últimas simplemente
+      // devuelven vacío/false y se ignoran.
+      const [seenBefore, backfilledRaw, storedRaw] = await Promise.all([
+        offsetId ? Promise.resolve(true) : hasAnyStoredMessages(id, chatId),
+        isFullyBackfilled(id, chatId),
+        getStoredMessagesPage(id, chatId, { limit, beforeId: offsetId }),
+      ]);
+      const alreadySeen = seenBefore;
+      const backfilled = alreadySeen ? backfilledRaw : false;
+      let storedPage = alreadySeen ? storedRaw : [];
+
+      const needsLiveFetch = !alreadySeen || (storedPage.length < limit && !backfilled);
+      // Chat servido desde la base de datos: se deja preparada en segundo plano
+      // la conexión + entidad (sin esperar), para que el primer ENVÍO desde
+      // este chat no pague esa resolución. La respuesta no depende de ello.
+      if (!needsLiveFetch && !offsetId) getTg().catch(() => {});
+      if (needsLiveFetch) {
+        const { client, entity } = await getTg();
+        const getMessagesStartedAt = Date.now();
+        const raw = await withTimeout(
+          client.getMessages(entity, { limit, offsetId }),
+          35_000,
+          "cargando los mensajes"
+        );
+        // Medicion temporal (ver telegram/perfSamples.ts): cuanto tarda HOY
+        // Telegram en devolver el historial de un chat - ya solo se mide
+        // cuando de verdad hace falta tocar Telegram (ver arriba), que es
+        // justo lo que esta caché local intenta evitar la mayoría de las
+        // veces.
+        recordPerfSample("getMessages", id, chatId, Date.now() - getMessagesStartedAt);
+        const rawMessages = raw as Api.Message[];
+        persistMessagesBulk(id, chatId, rawMessages); // fire-and-forget: deja la caché lista para la próxima vez
+        if (rawMessages.length < limit) markFullyBackfilled(id, chatId); // esto fue TODO lo que quedaba hacia atrás
+        baseMessages = rawMessages
+          .filter((m) => m.message || m.media)
+          .map((m) => ({
             id: m.id,
             text: m.message || "",
             out: !!m.out,
             date: m.date ? new Date(m.date * 1000).toISOString() : null,
-            // El archivo en si se pide luego a /gallery/:id/thumb y
-            // /gallery/:id/media (mismos endpoints que la Galeria, ya
-            // funcionan para cualquier mensaje con media de este chat).
-            mediaType,
-            hasThumb: mediaType === "photo" || mediaType === "video",
-          };
-        })
-        .reverse(); // mas antiguo primero, para pintar de arriba a abajo
+            mediaType: m.media ? classifyGalleryMedia(m.media) : null,
+          }))
+          .reverse(); // mas antiguo primero, para pintar de arriba a abajo
+        hasMore = rawMessages.length >= limit;
+      } else {
+        baseMessages = storedPage;
+        // backfilled=true aquí siempre (si no, needsLiveFetch habría sido
+        // true salvo que storedPage ya llenara el límite pedido) - en ese
+        // caso hasMore depende de si queda algo guardado más antiguo que
+        // lo que se acaba de devolver; si no hay nada en esta página,
+        // trivialmente no hay más.
+        if (baseMessages.length === 0) {
+          hasMore = false;
+        } else if (!backfilled) {
+          hasMore = true; // se llenó el límite pero el historial no está completo: puede haber más
+        } else {
+          hasMore = (await countOlderStored(id, chatId, baseMessages[0].id)) > 0;
+        }
+      }
+
+      // "Tick de leído" (✓✓ como Telegram/TeleCrew): hasta qué id de mensaje
+      // saliente nuestro ha confirmado Telegram que el fan ha leído en este
+      // chat (ver UpdateReadHistoryOutbox en telegram/liveEvents.ts). 0 =
+      // sin ningún aviso de lectura todavía (desde que arrancó el servidor):
+      // el frontend lo pinta como un solo ✓ (enviado), no como no-leído.
+      const readMaxId = getOutboxReadMaxId(id, chatId);
+      const messages = baseMessages.map((m) => ({
+        ...m,
+        // Solo tiene sentido para los nuestros (out=true) - el frontend
+        // ignora este campo en los mensajes entrantes.
+        read: !!m.out && readMaxId > 0 && m.id <= readMaxId,
+        // El archivo en si se pide luego a /gallery/:id/thumb y
+        // /gallery/:id/media (mismos endpoints que la Galeria, ya
+        // funcionan para cualquier mensaje con media de este chat).
+        hasThumb: m.mediaType === "photo" || m.mediaType === "video",
+        // Qué chatter mandó este mensaje (si se pudo saber) - se rellena
+        // justo debajo, cruzando con ChatterMessageLog.
+        sentBy: null as string | null,
+      }));
+
+      // Quién mandó cada mensaje nuestro (chatBubble lo pinta junto a la
+      // hora y el tick): se guardó en /send (ver logChatterMessage) con el
+      // id real que Telegram le dio. Mensajes de antes de que esto
+      // existiera (telegramMessageId null en la tabla) se quedan sin
+      // etiquetar - no hay forma de saber quién los mandó.
+      const outIds = messages.filter((m) => m.out).map((m) => m.id);
+      if (outIds.length > 0) {
+        const logs = await prisma.chatterMessageLog.findMany({
+          where: { accountId: id, chatId, telegramMessageId: { in: outIds } },
+          select: { telegramMessageId: true, workerName: true },
+        });
+        const sentByMessageId = new Map<number, string>();
+        for (const log of logs) {
+          if (log.telegramMessageId != null) sentByMessageId.set(log.telegramMessageId, log.workerName);
+        }
+        for (const m of messages) {
+          if (m.out) m.sentBy = sentByMessageId.get(m.id) || null;
+        }
+      }
       markDialogRead(id, chatId);
-      return { messages, hasMore: (raw as Api.Message[]).length >= limit };
+      // Confirmación de lectura REAL a Telegram: a petición expresa de
+      // Aitor (antes el "modo shadow" bloqueaba esto siempre, para
+      // cualquier agencia, sin opción - ver el comentario grande de
+      // applyShadowStatus en connectionPool.ts). Ahora, SOLO para las
+      // agencias que tengan el modo shadow desactivado en Configuración, al
+      // abrir un chat aquí se le dice a Telegram de verdad "esto está
+      // leído" - así la propia app de Telegram del móvil (y el fan) quedan
+      // sincronizados con lo que se hace desde el panel, en vez de quedarse
+      // con burbujas de no-leído "fantasma" para siempre. Con el modo
+      // shadow activado (el valor de siempre) no cambia nada: sigue sin
+      // mandarse jamás, igual que hasta ahora. Fire-and-forget y en un
+      // try/catch aparte: si esto falla (FLOOD_WAIT puntual, etc.) no debe
+      // tirar abajo la respuesta de los mensajes, que ya se tienen listos.
+      isShadowModeEnabled(account.agencyId)
+        .then((shadow) => {
+          if (shadow) return;
+          return getTg().then(({ client, entity }) => client.markAsRead(entity)).catch(() => {});
+        })
+        .catch(() => {});
+      return { messages, hasMore };
     } catch (err) {
       request.log.error(err);
       if (shouldInvalidateConnection(err)) invalidateAccountClient(id);
@@ -986,10 +1224,23 @@ export async function registerMessagesRoutes(app: FastifyInstance) {
     try {
       const client = await getAccountClient(account);
       const entity = await resolveDialogEntity(client, id, chatId);
-      await client.sendMessage(entity, {
+      const sendStartedAt = Date.now();
+      const sent = await client.sendMessage(entity, {
         message: trimmed,
         formattingEntities: formattingEntities.length > 0 ? formattingEntities : undefined,
       });
+      // Medicion temporal (ver telegram/perfSamples.ts) - mismo motivo que
+      // en GET .../messages, aqui para el tramo de ENVIAR.
+      recordPerfSample("sendMessage", id, chatId, Date.now() - sendStartedAt);
+      // Guarda este mensaje en la copia local (ver telegram/messageStore.ts)
+      // YA, sin esperar al eco del evento en vivo (que, como dice el
+      // comentario de abajo sobre el detector de pagos, no siempre llega
+      // con la misma conexión que acaba de enviar) - así el chat recién
+      // enviado está completo en caché al instante.
+      if (sent) persistMessage(id, chatId, sent as Api.Message);
+      // La lista de chats tambien debe reflejar YA este mensaje como el ultimo
+      // de la conversacion (el eco en vivo no siempre llega).
+      touchDialogFromLiveMessage(id, chatId, { text: trimmed, out: true, date: new Date().toISOString() });
       logChatterMessage({
         accountId: id,
         chatId,
@@ -997,6 +1248,10 @@ export async function registerMessagesRoutes(app: FastifyInstance) {
         workerName: chatterNameFromRequest(request),
         message: text.trim(),
         lastFanMessageAt,
+        // id real que Telegram le dio a este mensaje - con esto GET
+        // .../messages puede decir qué chatter mandó cada burbuja (ver
+        // "sentBy" más abajo en ese endpoint).
+        telegramMessageId: typeof sent?.id === "number" ? sent.id : null,
       });
       // Detector de pagos: antes esto solo se disparaba si el "eco" del
       // propio envío volvía a llegar como evento en vivo de Telegram
@@ -1039,6 +1294,59 @@ export async function registerMessagesRoutes(app: FastifyInstance) {
         }
       }
       return reply.code(502).send({ error: msg || "No se pudo enviar el mensaje." });
+    }
+  });
+
+  // Borrar un mensaje ENVIADO desde el CRM (solo los nuestros, out=true).
+  // Se borra también en Telegram (para el fan) y queda registrado en
+  // DeletedMessageLog con el texto original, el fan, quién lo envió y quién
+  // lo borró - es lo que enseña Informes → Dashboard → Mensajes borrados.
+  app.delete("/api/accounts/:id/dialogs/:chatId/messages/:messageId", async (request, reply) => {
+    const { id, chatId, messageId } = request.params as { id: string; chatId: string; messageId: string };
+    if (chatId === TELEGRAM_SERVICE_CHAT_ID && isRestrictedWorker(request)) {
+      return reply.code(403).send({ error: "No tienes acceso a este chat." });
+    }
+    const msgId = Number(messageId);
+    if (!Number.isInteger(msgId) || msgId <= 0) return reply.code(400).send({ error: "Mensaje no válido" });
+    const body = (request.body || {}) as { text?: string; chatTitle?: string };
+    const account = await prisma.account.findUniqueOrThrow({ where: { id } });
+    const stored = await prisma.storedMessage.findUnique({
+      where: { accountId_chatId_telegramMessageId: { accountId: id, chatId, telegramMessageId: msgId } },
+    });
+    if (stored && !stored.out) {
+      return reply.code(403).send({ error: "Solo se pueden borrar los mensajes enviados por vosotros." });
+    }
+    const sentLog = await prisma.chatterMessageLog.findFirst({
+      where: { accountId: id, chatId, telegramMessageId: msgId },
+      orderBy: { sentAt: "desc" },
+    });
+    const text = (stored?.text || sentLog?.message || body.text || "").slice(0, 4000);
+    const mediaLabel = stored?.mediaType ? `[${stored.mediaType}]` : "";
+    // Primero se anota (así nunca se borra algo sin dejar rastro) y si
+    // Telegram falla, se quita la anotación.
+    const log = await prisma.deletedMessageLog.create({
+      data: {
+        accountId: id,
+        chatId,
+        chatTitle: sentLog?.chatTitle || body.chatTitle || getCachedDialogTitle(id, chatId) || null,
+        telegramMessageId: msgId,
+        message: text || mediaLabel || "(sin texto)",
+        mediaType: stored?.mediaType || null,
+        sentBy: sentLog?.workerName || null,
+        deletedBy: chatterNameFromRequest(request),
+        sentAt: stored?.date || sentLog?.sentAt || null,
+      },
+    });
+    try {
+      const client = await getAccountClient(account);
+      const entity = await resolveDialogEntity(client, id, chatId);
+      await client.deleteMessages(entity, [msgId], { revoke: true });
+      await deleteStoredMessage(id, chatId, msgId);
+      return { ok: true };
+    } catch (err: any) {
+      request.log.error(err);
+      await prisma.deletedMessageLog.delete({ where: { id: log.id } }).catch(() => {});
+      return reply.code(502).send({ error: err?.errorMessage || err?.message || "No se pudo borrar el mensaje." });
     }
   });
 
@@ -1179,6 +1487,66 @@ export async function registerMessagesRoutes(app: FastifyInstance) {
     }
   });
 
+  // "Editar nombre del fan" (como en TeleCrew): deja cambiar el nombre con
+  // el que se ve a este cliente en el panel (cabecera del chat, lista de
+  // Mensajes...) y, a la vez, cambia ese mismo nombre DE VERDAD en Telegram
+  // - el nombre de contacto que esta cuenta tiene guardado para él, visible
+  // en la propia app de Telegram de la cuenta, no solo aquí en el CRM -.
+  // A PROPÓSITO solo se deja tocar el nombre (nunca teléfono, usuario,
+  // apellido...): disponible para cualquier trabajador con acceso a este
+  // chat, igual que el resto de botones de la cabecera (ver dialogs(\/.*)?
+  // en WORKER_ACCESSIBLE_PATH_PATTERNS, index.ts).
+  app.post("/api/accounts/:id/dialogs/:chatId/fan-name", async (request, reply) => {
+    const { id, chatId } = request.params as { id: string; chatId: string };
+    if (chatId === TELEGRAM_SERVICE_CHAT_ID && isRestrictedWorker(request)) {
+      return reply.code(403).send({ error: "No tienes acceso a este chat." });
+    }
+    const body = request.body as { name?: string };
+    const newName = (body?.name || "").trim();
+    if (!newName) return reply.code(400).send({ error: "El nombre no puede estar vacío." });
+    if (newName.length > 64) return reply.code(400).send({ error: "El nombre es demasiado largo (máximo 64 caracteres)." });
+    const account = await prisma.account.findUniqueOrThrow({ where: { id } });
+    try {
+      const client = await getAccountClient(account);
+      const fanEntity = await resolveDialogEntity(client, id, chatId);
+      const fanUser = fanEntity as any;
+      if (fanUser?.className !== "User") {
+        return reply.code(400).send({ error: "Solo se puede editar el nombre de un cliente (no de un grupo o canal)." });
+      }
+      // Se guarda como contacto de ESTA cuenta con el nombre nuevo (sin
+      // apellido, a propósito solo se toca el nombre) - es lo mismo que hace
+      // Telegram cuando guardas/editas un contacto a mano, así que el
+      // cambio se ve de verdad en la propia app de Telegram de la cuenta.
+      await withTimeout(
+        client.invoke(
+          new Api.contacts.AddContact({
+            id: new Api.InputUser({ userId: fanUser.id, accessHash: fanUser.accessHash }),
+            firstName: newName,
+            lastName: "",
+            phone: fanUser.phone || "",
+            addPhonePrivacyException: false,
+          })
+        ),
+        35_000,
+        "renombrando al cliente"
+      );
+      // Se actualiza también lo que ya tenemos cacheado (lista de Mensajes,
+      // nota del fan...) para que el nombre nuevo se vea al instante, sin
+      // esperar al siguiente refresco de /dialogs contra Telegram.
+      await prisma.cachedDialog
+        .update({ where: { accountId_chatId: { accountId: id, chatId } }, data: { title: newName } })
+        .catch(() => {});
+      await prisma.fanNote
+        .update({ where: { accountId_chatId: { accountId: id, chatId } }, data: { chatTitle: newName } })
+        .catch(() => {});
+      markDialogsStale(id);
+      return { ok: true, title: newName };
+    } catch (err: any) {
+      request.log.error(err);
+      return reply.code(502).send({ error: err?.errorMessage || err?.message || "No se pudo cambiar el nombre del cliente." });
+    }
+  });
+
   // Grupos que la cuenta y este cliente tienen en común (lo mismo que
   // Telegram muestra al tocar el nombre de un contacto: "Grupos en común").
   // Sirve para encontrar el grupo restringido de este cliente si ya existía
@@ -1247,17 +1615,25 @@ export async function registerMessagesRoutes(app: FastifyInstance) {
       reply.header("Cache-Control", "private, max-age=1800");
       return reply.send(cached);
     }
+    if ((noAvatarUntil.get(cacheKey) || 0) > Date.now()) return noAvatarReply(reply);
     const account = await prisma.account.findUniqueOrThrow({ where: { id } });
     try {
-      const client = await getAccountClient(account);
-      const entity = await resolveDialogEntity(client, id, chatId);
-      const buf = (await client.downloadProfilePhoto(entity, { isBig: false })) as Buffer | undefined;
-      if (!buf || buf.length === 0) return reply.code(404).send();
+      const buf = await withAvatarSlot(id, async () => {
+        const client = await getAccountClient(account);
+        const entity = await resolveDialogEntity(client, id, chatId);
+        return (await client.downloadProfilePhoto(entity, { isBig: false })) as Buffer | undefined;
+      });
+      if (!buf || buf.length === 0) {
+        noAvatarUntil.set(cacheKey, Date.now() + NO_AVATAR_TTL_MS);
+        return noAvatarReply(reply);
+      }
       setCachedMedia(cacheKey, buf);
       reply.header("Content-Type", "image/jpeg");
       reply.header("Cache-Control", "private, max-age=1800");
       return reply.send(buf);
     } catch (err) {
+      // fallo puntual (conexión...): se recuerda poco rato para no insistir en bucle
+      noAvatarUntil.set(cacheKey, Date.now() + 2 * 60 * 1000);
       return reply.code(404).send();
     }
   });
@@ -1653,6 +2029,31 @@ export async function registerMessagesRoutes(app: FastifyInstance) {
     }
   }
 
+  // Si ni añadiéndolo como contacto ni con AddChatUser se pudo meter al
+  // cliente dentro del grupo, antes nos quedábamos en "copiar el enlace al
+  // portapapeles para que el chatter se lo pegue a mano" - un paso manual
+  // que dependía de que el chatter se acordara de hacerlo. Ahora, en cuanto
+  // hay un enlace de invitación, se lo mandamos DIRECTAMENTE por privado al
+  // cliente (en su chat de siempre con esta cuenta) para que pueda unirse
+  // solo con tocarlo, sin que el chatter tenga que hacer nada más. Esto es
+  // best-effort: si fallara el envío (chat bloqueado, etc.) devolvemos false
+  // y el aviso que se le muestra al chatter sigue incluyendo el enlace, para
+  // que pueda mandarlo él mismo como respaldo.
+  async function sendInviteLinkToFan(client: any, fanEntity: any, inviteLink: string): Promise<boolean> {
+    try {
+      await withTimeout(
+        client.sendMessage(fanEntity, {
+          message: `¡Hola! Para completar esto te invito a un grupo privado, solo tienes que pulsar este enlace para unirte: ${inviteLink}`,
+        }),
+        35_000,
+        "enviando el enlace de invitación al cliente"
+      );
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   // Un grupo restringido de cliente de verdad es solo la modelo + ese
   // cliente (como mucho +1 mientras la cuenta ayudante todavia no ha
   // salido del todo) - nunca mas de un puñado de personas. Se comparte con
@@ -1972,7 +2373,14 @@ export async function registerMessagesRoutes(app: FastifyInstance) {
     fanUser: any,
     fanTitle: string,
     primaryClient: any
-  ): Promise<{ groupChatId: string; title: string; fanAdded: boolean; warning?: string; inviteLink?: string | null }> {
+  ): Promise<{
+    groupChatId: string;
+    title: string;
+    fanAdded: boolean;
+    warning?: string;
+    inviteLink?: string | null;
+    linkSentToFan?: boolean;
+  }> {
     const helperAccount = await prisma.account.findUnique({ where: { id: account.restrictedGroupHelperAccountId! } });
     if (!helperAccount) throw new Error("La cuenta ayudante configurada ya no existe.");
     const helperClient = await getAccountClient(helperAccount);
@@ -2092,17 +2500,21 @@ export async function registerMessagesRoutes(app: FastifyInstance) {
     if (!fanIsIn) {
       const reason = addErr?.errorMessage || addErr?.message;
       const inviteLink = await exportGroupInviteLink(primaryClient, rawId);
+      const linkSent = inviteLink ? await sendInviteLinkToFan(primaryClient, fanUser, inviteLink) : false;
       return {
         groupChatId,
         title,
         fanAdded: false,
         inviteLink,
+        linkSentToFan: linkSent,
         warning:
           `Se creó el grupo, pero el cliente no quedó dentro` +
           (reason ? ` (Telegram dijo: ${reason})` : "") +
-          (inviteLink
-            ? `. Te copiamos un enlace de invitación al grupo - mándaselo por privado para que entre él mismo.`
-            : `. Prueba a reintentarlo con 🔁, o pídele que te añada como contacto primero.`),
+          (linkSent
+            ? `. Le hemos mandado por privado el enlace de invitación - puede unirse solo con tocarlo.`
+            : inviteLink
+              ? `. Te copiamos un enlace de invitación al grupo - mándaselo por privado para que entre él mismo.`
+              : `. Prueba a reintentarlo con 🔁, o pídele que te añada como contacto primero.`),
       };
     }
 
@@ -2136,6 +2548,42 @@ export async function registerMessagesRoutes(app: FastifyInstance) {
       }
     }
     return { exists: !!group, groupChatId: group?.groupChatId ?? null, groupTitle: group?.groupTitle ?? null };
+  });
+
+  // "Usar este grupo como el restringido": cuando el chatter mira la lista
+  // de "grupos en común" (ver /common-groups arriba) y reconoce a mano cuál
+  // de ellos es el grupo de verdad de ese cliente (p.ej. porque el equipo
+  // le ha ido poniendo notas de venta al chat del fan y ya no se llama
+  // igual que el grupo, así que la detección automática por nombre no lo
+  // encuentra solo), esto lo guarda en ClientRestrictedGroup para que las
+  // próximas veces (el botón 👥, o tocar el nombre del fan) vayan directas
+  // ahí en vez de ofrecer crear uno nuevo o volver a mostrar la lista.
+  // Mismo tope de tamaño que el resto (MAX_CLIENT_GROUP_MEMBERS) para no
+  // adoptar por error un grupo grande compartido por casualidad.
+  app.post("/api/accounts/:id/dialogs/:chatId/restricted-group/adopt", async (request, reply) => {
+    const { id, chatId } = request.params as { id: string; chatId: string };
+    const body = request.body as { groupChatId?: string; groupTitle?: string };
+    if (!body.groupChatId) return reply.code(400).send({ error: "Falta el grupo a usar." });
+    const account = await prisma.account.findUniqueOrThrow({ where: { id } });
+    try {
+      const client = await getAccountClient(account);
+      const tooLarge = await isGroupTooLargeForClient(client, body.groupChatId);
+      if (tooLarge) {
+        return reply.code(400).send({
+          error: `Este grupo tiene más de ${MAX_CLIENT_GROUP_MEMBERS} miembros, así que no puede ser el grupo restringido de un solo cliente.`,
+        });
+      }
+      await prisma.clientRestrictedGroup.upsert({
+        where: { accountId_chatId: { accountId: id, chatId } },
+        create: { accountId: id, chatId, groupChatId: body.groupChatId, groupTitle: body.groupTitle || null },
+        update: { groupChatId: body.groupChatId, groupTitle: body.groupTitle || null },
+      });
+      markDialogsStale(id);
+      return { ok: true, groupChatId: body.groupChatId, groupTitle: body.groupTitle || null };
+    } catch (err: any) {
+      request.log.error(err);
+      return reply.code(502).send({ error: err?.errorMessage || err?.message || "No se pudo usar ese grupo como el restringido." });
+    }
   });
 
   // Crea el grupo restringido si no existe todavia, o devuelve el que ya hay.
@@ -2185,11 +2633,14 @@ export async function registerMessagesRoutes(app: FastifyInstance) {
             }
             if (!fanAdded) {
               inviteLink = await exportGroupInviteLink(client, rawChatId);
+              const linkSent = inviteLink ? await sendInviteLinkToFan(client, fanUser, inviteLink) : false;
               warning =
                 "El grupo ya existía, pero el cliente no está dentro." +
-                (inviteLink
-                  ? " Te copiamos un enlace de invitación al grupo - mándaselo por privado para que entre él mismo."
-                  : " Suele pasar cuando el cliente tiene su privacidad puesta para que solo sus contactos le añadan a grupos - prueba a reintentarlo con 🔁, o pídele que te añada como contacto primero.");
+                (linkSent
+                  ? " Le hemos mandado por privado el enlace de invitación - puede unirse solo con tocarlo."
+                  : inviteLink
+                    ? " Te copiamos un enlace de invitación al grupo - mándaselo por privado para que entre él mismo."
+                    : " Suele pasar cuando el cliente tiene su privacidad puesta para que solo sus contactos le añadan a grupos - prueba a reintentarlo con 🔁, o pídele que te añada como contacto primero.");
             }
           }
         }
@@ -2321,11 +2772,14 @@ export async function registerMessagesRoutes(app: FastifyInstance) {
         }
         if (!fanAdded) {
           inviteLink = await exportGroupInviteLink(client, rawId);
+          const linkSent = inviteLink ? await sendInviteLinkToFan(client, fanUser, inviteLink) : false;
           warning =
             "Se creó el grupo, pero el cliente no quedó dentro." +
-            (inviteLink
-              ? " Te copiamos un enlace de invitación al grupo - mándaselo por privado para que entre él mismo."
-              : " Suele pasar cuando el cliente tiene su privacidad puesta para que solo sus contactos le añadan a grupos - prueba a reintentarlo con 🔁, o pídele que te añada como contacto primero.");
+            (linkSent
+              ? " Le hemos mandado por privado el enlace de invitación - puede unirse solo con tocarlo."
+              : inviteLink
+                ? " Te copiamos un enlace de invitación al grupo - mándaselo por privado para que entre él mismo."
+                : " Suele pasar cuando el cliente tiene su privacidad puesta para que solo sus contactos le añadan a grupos - prueba a reintentarlo con 🔁, o pídele que te añada como contacto primero.");
         }
       }
 
@@ -2371,11 +2825,15 @@ export async function registerMessagesRoutes(app: FastifyInstance) {
       const fanAdded = await chatHasFan(client, rawChatId, fanUser.id);
       if (!fanAdded) {
         const inviteLink = await exportGroupInviteLink(client, rawChatId);
+        const linkSent = inviteLink ? await sendInviteLinkToFan(client, fanUser, inviteLink) : false;
         return reply.code(502).send({
-          error: inviteLink
-            ? "El cliente sigue sin poder entrar directamente. Te copiamos un enlace de invitación - mándaselo por privado para que entre él mismo."
-            : "Telegram aceptó la petición, pero el cliente sigue sin aparecer dentro del grupo. Puede que su privacidad no deje que le añadan sin haber hablado antes por privado.",
+          error: linkSent
+            ? "El cliente sigue sin poder entrar directamente, pero le hemos mandado por privado el enlace de invitación - puede unirse solo con tocarlo."
+            : inviteLink
+              ? "El cliente sigue sin poder entrar directamente. Te copiamos un enlace de invitación - mándaselo por privado para que entre él mismo."
+              : "Telegram aceptó la petición, pero el cliente sigue sin aparecer dentro del grupo. Puede que su privacidad no deje que le añadan sin haber hablado antes por privado.",
           inviteLink,
+          linkSentToFan: linkSent,
         });
       }
       return { ok: true };
@@ -2613,6 +3071,130 @@ export async function registerMessagesRoutes(app: FastifyInstance) {
     return { ok: true };
   });
 
+  // Insignias de "sin leer" por cuenta en Mensajes Pro: UNA sola petición
+  // para todas las cuentas a la vez (mismo criterio de permiso que
+  // /api/accounts/live-stream), en vez de una petición por cuenta como
+  // antes. Con varias creadoras, cada mensaje que llegaba disparaba un
+  // unread-summary por cuenta A LA VEZ desde refreshProTabUnreadBadges -
+  // sumado a las dos conexiones SSE que ya están siempre abiertas en
+  // Mensajes Pro (live-stream + la de la pestaña activa), eso llegaba a
+  // agotar el límite de conexiones simultáneas por origen del navegador
+  // (6 en Chrome con HTTP/1.1) y el panel se quedaba "colgado" - dejaba de
+  // cargar justo al entrar a una conversación, porque ya no quedaba hueco
+  // para esa petición. Con una sola petición aquí, ese pico desaparece.
+  app.get("/api/accounts/unread-summary-bulk", async (request, reply) => {
+    const worker = await getWorkerFromRequest(request);
+    let accountRows: { id: string; label: string }[];
+    if (worker) {
+      const isPro = (request.raw.url || "").startsWith("/pro/");
+      const perms = await prisma.workerPermission.findMany({
+        where: { workerId: worker.id, section: isPro ? "mensajes-pro" : "mensajes" },
+        include: { account: { select: { id: true, label: true } } },
+      });
+      accountRows = perms.map((p) => p.account);
+    } else {
+      accountRows = await prisma.account.findMany({ select: { id: true, label: true } });
+    }
+
+    const results = await Promise.all(
+      accountRows.map(async ({ id }) => {
+        try {
+          const account = await prisma.account.findUnique({ where: { id } });
+          if (!account) return { id, totalUnread: 0 };
+          const client = await getAccountClient(account);
+          const dialogs = await getCachedDialogs(client, id);
+          const totalUnread = dialogs
+            .filter((d) => d.isUser)
+            .reduce((sum, d) => sum + (d.unreadCount || 0), 0);
+          return { id, totalUnread };
+        } catch (err) {
+          request.log.error(err);
+          return { id, totalUnread: 0 };
+        }
+      })
+    );
+    const byAccount: Record<string, number> = {};
+    for (const r of results) byAccount[r.id] = r.totalUnread;
+    return { byAccount };
+  });
+
+  // Notificaciones de escritorio con varias creadoras a la vez (pedido de
+  // Aitor: un chatter con acceso a 2, 4, 5 o 6 modelos en Mensajes Pro debe
+  // recibir el aviso de mensaje nuevo como en Telegram Desktop, aunque la
+  // creadora que acaba de recibirlo no sea la pestaña que tiene delante
+  // ahora mismo). UNA sola conexión SSE multiplexa los eventos de TODAS las
+  // cuentas a las que quien pregunta tiene acceso, en vez de abrir una
+  // conexión por cuenta - eso sí agotaría pronto el límite de conexiones
+  // por origen del navegador con varias creadoras (ver el comentario del
+  // mismo problema, para "Abrir en ventana nueva", en el stream de una sola
+  // cuenta justo debajo). El permiso (qué cuentas puede ver) es EL MISMO
+  // criterio que /api/mensajes-pro/accounts: por WorkerPermission si hay
+  // trabajador (según se pida por /api o por /pro/api), todas si es el
+  // dueño/admin.
+  app.get("/api/accounts/live-stream", async (request, reply) => {
+    const worker = await getWorkerFromRequest(request);
+    let accountRows: { id: string; label: string }[];
+    if (worker) {
+      const isPro = (request.raw.url || "").startsWith("/pro/");
+      const perms = await prisma.workerPermission.findMany({
+        where: { workerId: worker.id, section: isPro ? "mensajes-pro" : "mensajes" },
+        include: { account: { select: { id: true, label: true } } },
+      });
+      accountRows = perms.map((p) => p.account);
+    } else {
+      accountRows = await prisma.account.findMany({ select: { id: true, label: true } });
+    }
+    if (accountRows.length === 0) {
+      reply.code(200).send({ error: "Sin cuentas accesibles." });
+      return;
+    }
+
+    reply.hijack();
+    reply.raw.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+      "X-Accel-Buffering": "no",
+    });
+    reply.raw.write("retry: 2000\n\n");
+
+    const unsubscribes = accountRows.map(({ id: accountId, label: accountLabel }) =>
+      subscribeToAccountEvents(accountId, (evt) => {
+        try {
+          // El título del chat se manda ya resuelto desde aquí (cache de
+          // dialogos del backend) para que el frontend no tenga que
+          // adivinarlo - en Mensajes Pro puede llegar un evento de una
+          // creadora que ni siquiera tiene pestaña abierta todavía.
+          const chatTitle = evt.type === "message" ? getCachedDialogTitle(accountId, evt.chatId) : undefined;
+          const notify = evt.type === "message" ? shouldNotifyChat(accountId, evt.chatId) : undefined;
+          reply.raw.write(`data: ${JSON.stringify({ ...evt, accountId, accountLabel, chatTitle, notify })}\n\n`);
+        } catch {
+          // conexion cerrada: el "close" de abajo limpia todo
+        }
+      })
+    );
+
+    const keepAlive = setInterval(() => {
+      try { reply.raw.write(": ping\n\n"); } catch { /* conexion cerrada */ }
+    }, 20000);
+
+    request.raw.on("close", () => {
+      clearInterval(keepAlive);
+      for (const unsub of unsubscribes) unsub();
+    });
+
+    // Fire-and-forget, en paralelo: asegura que cada cuenta tiene su
+    // cliente (y su listener en vivo) conectado, SIN bloquear el ping ni la
+    // suscripcion de arriba - ver comentario grande en /api/accounts/:id/stream.
+    // Con varias cuentas a la vez (Mensajes Pro), bastaba con que UNA sola
+    // tardara en conectar para retrasar el primer ping de TODAS.
+    for (const { id: accountId } of accountRows) {
+      prisma.account.findUnique({ where: { id: accountId } })
+        .then((account) => account && getAccountClient(account))
+        .catch((err) => request.log.error(err));
+    }
+  });
+
   // Stream en tiempo real (Server-Sent Events) de mensajes nuevos de esta
   // cuenta: cuando llega o se envia un mensaje de Telegram, se empuja aqui
   // al instante, para que el panel no dependa de refrescar a mano.
@@ -2628,12 +3210,19 @@ export async function registerMessagesRoutes(app: FastifyInstance) {
     });
     reply.raw.write("retry: 2000\n\n");
 
-    try {
-      await getAccountClient(account); // asegura que el cliente (y su listener) esta conectado
-    } catch (err) {
-      request.log.error(err);
-    }
-
+    // IMPORTANTE: la suscripcion a eventos y el primer "ping" se montan YA,
+    // antes de esperar a Telegram - antes se esperaba aqui a
+    // getAccountClient() (hasta 40s si la cuenta tardaba en conectar) antes
+    // de mandar nada mas al navegador, así que si ese connect tardaba, la
+    // conexion SSE podia quedarse sin mandar ni un byte el tiempo
+    // suficiente para que el proxy la diera por muerta (o para que
+    // pareciera "conectada" en el frontend sin estarlo de verdad), y
+    // cualquier mensaje que llegara justo en ese hueco se perdia porque
+    // todavia no habia nadie suscrito para recibirlo. Ahora la suscripcion
+    // y el ping arrancan al instante, y getAccountClient se deja conectando
+    // en segundo plano (fire-and-forget) - en cuanto termine, attachLiveEvents
+    // empieza a emitir a esta MISMA suscripcion sin que haga falta reabrir
+    // la conexion SSE.
     const unsubscribe = subscribeToAccountEvents(id, (evt) => {
       reply.raw.write(`data: ${JSON.stringify(evt)}\n\n`);
     });
@@ -2645,5 +3234,7 @@ export async function registerMessagesRoutes(app: FastifyInstance) {
       clearInterval(keepAlive);
       unsubscribe();
     });
+
+    getAccountClient(account).catch((err) => request.log.error(err));
   });
 }

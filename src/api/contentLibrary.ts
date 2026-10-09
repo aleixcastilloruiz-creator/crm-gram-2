@@ -8,21 +8,49 @@ import { searchGroupDialogs, resolveDialogEntity } from "../telegram/dialogs";
 import { groupByAlbum, SourceMessageGroup } from "../engine/sender";
 import { getCachedMedia, setCachedMedia } from "../telegram/mediaCache";
 import { extractSentMessageIds } from "./messages";
+// Igual que en messages.ts: "big-integer" ya es dependencia de gramjs, y los
+// offsets de descarga de archivo deben ser BigInteger (no un number normal).
+const bigInt = require("big-integer");
 
 /** Registra (best-effort, nunca hace fallar el envío) que un mensaje
  * recién enviado a un fan viene de la bóveda, para la etiqueta "GRUPO" de la
- * Galería del chat. */
-async function logContentSend(accountId: string, chatId: string, result: any): Promise<void> {
+ * Galería del chat y para el "YA ENVIADO" de la propia bóveda (ver
+ * getAlreadySentItemIds más abajo). sourceMessageId es el id del item de la
+ * bóveda de origen (el mensaje "portada" del grupo/álbum que se mandó) -
+ * opcional por si el llamante no lo tiene. */
+async function logContentSend(accountId: string, chatId: string, result: any, sourceMessageId?: string): Promise<void> {
   try {
     const ids = extractSentMessageIds(result);
     if (ids.length === 0) return;
     await prisma.contentSendLog.createMany({
-      data: ids.map((telegramMessageId) => ({ accountId, chatId, telegramMessageId })),
+      data: ids.map((telegramMessageId) => ({ accountId, chatId, telegramMessageId, sourceMessageId: sourceMessageId || null })),
       skipDuplicates: true,
     });
   } catch {
     // no pasa nada si esto falla, el envío ya se hizo
   }
+}
+
+/** "YA ENVIADO": ids de items de la bóveda (ver sourceMessageId arriba) que
+ * ya se le mandaron a ESTE chat/fan en algún momento, para que la bóveda
+ * pueda marcarlos al abrirla con esa conversación delante. Vacío si no hay
+ * chatId (p.ej. la bóveda abierta desde "Programar posts", sin un fan
+ * concreto detrás). */
+async function getAlreadySentItemIds(accountId: string, chatId: string | undefined): Promise<Set<string>> {
+  if (!chatId) return new Set();
+  const rows = await prisma.contentSendLog.findMany({
+    where: { accountId, chatId, sourceMessageId: { not: null } },
+    select: { sourceMessageId: true },
+  });
+  return new Set(rows.map((r) => r.sourceMessageId!));
+}
+
+/** Añade `alreadySentToChat` a cada item sin tocar la cache de items (ver
+ * getCachedItems/setCachedItems) - esto es especifico del chat que se esta
+ * mirando ahora mismo, no del contenido en si, así que nunca debe formar
+ * parte de la clave de cache ni guardarse en ella. */
+function markAlreadySent<T extends { id: number | string }>(items: T[], sentIds: Set<string>): (T & { alreadySentToChat: boolean })[] {
+  return items.map((it) => ({ ...it, alreadySentToChat: sentIds.has(String(it.id)) }));
 }
 
 // Valor "magico" de Telegram para que una foto/vídeo se autodestruya nada
@@ -54,6 +82,13 @@ function makeSlotLimiter(maxConcurrent: number) {
 }
 // Miniaturas: pesan poco (unos KB), toleran mas paralelismo.
 const withThumbSlot = makeSlotLimiter(10);
+// Contador de archivos por tema (GetForumTopics no lo trae, hay que pedirlo
+// aparte por cada tema): sin tope, una cuenta con muchos temas lanzaba
+// TODAS esas llamadas a Telegram a la vez en el primer golpe de caché frío
+// (cada 10 min, ver TOPICS_TTL_MS), lo que podia saturar la conexion y
+// ralentizar justo la apertura de la bóveda. 6 a la vez es de sobra para
+// que vaya rapido sin arriesgarse a un FLOOD_WAIT.
+const withTopicCountSlot = makeSlotLimiter(6);
 
 // Algunos mensajes (documentos, stickers, contenido reenviado con
 // "no reenviar", etc.) nunca van a poder generar una miniatura: cada intento
@@ -398,7 +433,7 @@ export async function registerContentLibraryRoutes(app: FastifyInstance) {
         rawTopics.map(async (t: any) => {
           let count: number | null = null;
           try {
-            const raw: any = await client.getMessages(entity, { replyTo: t.id, limit: 1 });
+            const raw: any = await withTopicCountSlot(() => client.getMessages(entity, { replyTo: t.id, limit: 1 }));
             count = typeof raw.total === "number" ? raw.total : raw.length;
           } catch {
             count = null;
@@ -471,11 +506,14 @@ export async function registerContentLibraryRoutes(app: FastifyInstance) {
     // todo desde el principio (igual que el historial de mensajes).
     // type: filtro opcional "photo" | "video" | "audio" para el desplegable
     // Todo/Fotos/Vídeos/Audios de dentro de un tema.
-    const q = request.query as { offsetId?: string; type?: string };
+    const q = request.query as { offsetId?: string; type?: string; chatId?: string };
     const typeFilter = q.type && q.type !== "all" ? q.type : null;
     const cacheKey = `topic-items:${id}:${topicId}:${q.offsetId || "0"}:${q.type || "all"}`;
     const cachedPayload = getCachedItems(cacheKey);
-    if (cachedPayload) return cachedPayload;
+    if (cachedPayload) {
+      const sentIds = await getAlreadySentItemIds(id, q.chatId);
+      return { ...cachedPayload, items: markAlreadySent(cachedPayload.items, sentIds) };
+    }
     const account = await prisma.account.findUniqueOrThrow({ where: { id } });
     if (!account.contentGroupChatId) return reply.code(400).send({ error: "Sin grupo de contenido configurado." });
     try {
@@ -529,7 +567,8 @@ export async function registerContentLibraryRoutes(app: FastifyInstance) {
       }
       const payload = { items: collected.slice(0, limit), hasMore, nextOffsetId };
       setCachedItems(cacheKey, payload);
-      return payload;
+      const sentIds = await getAlreadySentItemIds(id, q.chatId);
+      return { ...payload, items: markAlreadySent(payload.items, sentIds) };
     } catch (err: any) {
       request.log.error(err);
       const detail = err?.errorMessage || err?.message || "";
@@ -543,11 +582,14 @@ export async function registerContentLibraryRoutes(app: FastifyInstance) {
   // medios" del panel de referencia.
   app.get("/api/accounts/:id/content-group/all-items", async (request, reply) => {
     const { id } = request.params as { id: string };
-    const q = request.query as { offsetId?: string; type?: string };
+    const q = request.query as { offsetId?: string; type?: string; chatId?: string };
     const typeFilter = q.type && q.type !== "all" ? q.type : null;
     const cacheKey = `all-items:${id}:${q.offsetId || "0"}:${q.type || "all"}`;
     const cachedPayload = getCachedItems(cacheKey);
-    if (cachedPayload) return cachedPayload;
+    if (cachedPayload) {
+      const sentIds = await getAlreadySentItemIds(id, q.chatId);
+      return { ...cachedPayload, items: markAlreadySent(cachedPayload.items, sentIds) };
+    }
     const account = await prisma.account.findUniqueOrThrow({ where: { id } });
     if (!account.contentGroupChatId) return reply.code(400).send({ error: "Sin grupo de contenido configurado." });
     try {
@@ -594,7 +636,8 @@ export async function registerContentLibraryRoutes(app: FastifyInstance) {
       }
       const payload = { items: collected.slice(0, limit), hasMore, nextOffsetId };
       setCachedItems(cacheKey, payload);
-      return payload;
+      const sentIds = await getAlreadySentItemIds(id, q.chatId);
+      return { ...payload, items: markAlreadySent(payload.items, sentIds) };
     } catch (err: any) {
       request.log.error(err);
       const detail = err?.errorMessage || err?.message || "";
@@ -625,6 +668,7 @@ export async function registerContentLibraryRoutes(app: FastifyInstance) {
 
   app.get("/api/accounts/:id/content-group/favorites", async (request, reply) => {
     const { id } = request.params as { id: string };
+    const q = request.query as { chatId?: string };
     const account = await prisma.account.findUniqueOrThrow({ where: { id } });
     if (!account.contentGroupChatId) return reply.code(400).send({ error: "Sin grupo de contenido configurado." });
     const favorites = await prisma.contentFavorite.findMany({ where: { accountId: id }, orderBy: { createdAt: "desc" } });
@@ -655,7 +699,8 @@ export async function registerContentLibraryRoutes(app: FastifyInstance) {
             note: notes.get(String(m.id)) || "",
           };
         });
-      return { items };
+      const sentIds = await getAlreadySentItemIds(id, q.chatId);
+      return { items: markAlreadySent(items, sentIds) };
     } catch (err: any) {
       request.log.error(err);
       const detail = err?.errorMessage || err?.message || "";
@@ -706,9 +751,20 @@ export async function registerContentLibraryRoutes(app: FastifyInstance) {
   });
 
   // Vista grande al darle "VER" a un contenido: la foto entera o el
-  // vídeo/audio completo (no la miniatura). Sin caché para vídeos/audios
-  // (podrían ser bastante pesados) — solo se pide bajo demanda al abrir la
-  // vista, no al pintar la rejilla.
+  // vídeo/audio completo (no la miniatura). Sin caché para archivos
+  // grandes (podrían pesar decenas de MB) — solo se pide bajo demanda al
+  // abrir la vista, no al pintar la rejilla.
+  //
+  // IMPORTANTE (rendimiento): antes esto bajaba el archivo ENTERO de
+  // Telegram a memoria y luego, ya completo, lo mandaba al navegador — es
+  // decir, el chatter esperaba la descarga completa DOS veces seguidas
+  // (Telegram -> servidor, y luego servidor -> navegador) antes de ver un
+  // solo fotograma. Ahora se transmite en streaming, Y además soporta
+  // peticiones "Range" (las que manda el navegador cuando arrastras la
+  // barra de un vídeo): en vez de tener que bajar/mandar el archivo desde
+  // el principio, se le pide a Telegram directamente el trozo que hace
+  // falta a partir del segundo al que saltaste, así que arrastrar la
+  // barra también funciona sin esperar a que cargue todo lo anterior.
   app.get("/api/accounts/:id/content-group/messages/:messageId/media", async (request, reply) => {
     const { id, messageId } = request.params as { id: string; messageId: string };
     const cacheKey = `content-full:${id}:${messageId}`;
@@ -718,22 +774,106 @@ export async function registerContentLibraryRoutes(app: FastifyInstance) {
       const client = await getAccountClient(account);
       const message = await getContentMessage(client, id, account.contentGroupChatId, messageId);
       if (!message || !message.media) return reply.code(404).send();
-      const cached = getCachedFullMedia(cacheKey);
-      if (cached) {
-        reply.header("Content-Type", mediaMimeType(message.media));
-        reply.header("Cache-Control", "private, max-age=3600");
-        return reply.send(cached);
-      }
+      const mimeType = mediaMimeType(message.media);
       const sizeBytes = mediaSizeBytes(message.media);
       if (sizeBytes && sizeBytes > MAX_FULL_MEDIA_BYTES) {
         return reply.code(413).send({ error: "Este archivo pesa demasiado para verlo aquí (más de 60MB)." });
       }
-      const buf = (await withFullMediaSlot(() => client.downloadMedia(message as Api.Message, {}))) as Buffer | undefined;
-      if (!buf) return reply.code(404).send();
-      setCachedFullMedia(cacheKey, buf);
-      reply.header("Content-Type", mediaMimeType(message.media));
-      reply.header("Cache-Control", "private, max-age=3600");
-      return reply.send(buf);
+
+      // Si ya lo tenemos entero en caché (alguien lo acaba de ver), para
+      // cualquier Range la respondemos directamente en memoria, sin tocar
+      // Telegram para nada.
+      const cached = getCachedFullMedia(cacheKey);
+
+      // Soporte de "Range: bytes=INICIO-FIN" para poder arrastrar la barra
+      // de reproducción sin tener que cargar el vídeo desde el principio.
+      const rangeHeader = request.headers.range;
+      let start = 0;
+      let end = sizeBytes ? sizeBytes - 1 : undefined;
+      let isPartial = false;
+      if (rangeHeader && sizeBytes) {
+        const m = /^bytes=(\d*)-(\d*)$/.exec(rangeHeader);
+        if (m && (m[1] !== "" || m[2] !== "")) {
+          const reqStart = m[1] !== "" ? parseInt(m[1], 10) : undefined;
+          const reqEnd = m[2] !== "" ? parseInt(m[2], 10) : undefined;
+          let s = reqStart ?? (reqEnd !== undefined ? sizeBytes - reqEnd : 0);
+          let e = reqEnd !== undefined && reqStart !== undefined ? reqEnd : sizeBytes - 1;
+          if (e > sizeBytes - 1) e = sizeBytes - 1;
+          if (s >= 0 && e < sizeBytes && s <= e) {
+            start = s;
+            end = e;
+            isPartial = true;
+          }
+        }
+      }
+
+      if (cached) {
+        const slice = isPartial ? cached.subarray(start, end! + 1) : cached;
+        reply.code(isPartial ? 206 : 200);
+        reply.header("Content-Type", mimeType);
+        reply.header("Accept-Ranges", "bytes");
+        reply.header("Content-Length", String(slice.length));
+        reply.header("Cache-Control", "private, max-age=3600");
+        if (isPartial) reply.header("Content-Range", `bytes ${start}-${end}/${cached.length}`);
+        return reply.send(slice);
+      }
+
+      reply.hijack();
+      const res = reply.raw;
+      const headers: Record<string, string> = {
+        "Content-Type": mimeType,
+        "Accept-Ranges": "bytes",
+        "Cache-Control": "private, max-age=3600",
+      };
+      if (sizeBytes) headers["Content-Length"] = String((end ?? sizeBytes - 1) - start + 1);
+      if (isPartial && sizeBytes) headers["Content-Range"] = `bytes ${start}-${end}/${sizeBytes}`;
+      res.writeHead(isPartial ? 206 : 200, headers);
+
+      // Solo guardamos en caché cuando se ha pedido el archivo COMPLETO
+      // desde el principio (lo normal al abrir el visor por primera vez);
+      // un trozo suelto de un salto de barra no se cachea entero.
+      const isFullFetch = start === 0 && (!sizeBytes || end === sizeBytes - 1);
+      const chunks: Buffer[] = [];
+      let totalBytes = 0;
+      let clientGone = false;
+      res.on("close", () => {
+        clientGone = true;
+      });
+      try {
+        await withFullMediaSlot(async () => {
+          const CHUNK_SIZE = 512 * 1024;
+          const iter = client.iterDownload({ file: message as any, offset: bigInt(start), requestSize: CHUNK_SIZE });
+          let pos = start;
+          for await (const chunk of iter) {
+            if (clientGone) break;
+            const buf: Buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+            const chunkStartAbs = pos;
+            const chunkEndAbs = pos + buf.length - 1;
+            let toWrite = buf;
+            let reachedEnd = false;
+            if (end !== undefined && chunkEndAbs >= end) {
+              toWrite = buf.subarray(0, end - chunkStartAbs + 1);
+              reachedEnd = true;
+            }
+            if (isFullFetch) {
+              chunks.push(toWrite);
+              totalBytes += toWrite.length;
+            }
+            const canContinue = res.write(toWrite);
+            if (!canContinue) {
+              await new Promise<void>((resolve) => res.once("drain", () => resolve()));
+            }
+            pos += buf.length;
+            if (reachedEnd) break;
+          }
+        });
+        if (!clientGone) res.end();
+        if (!clientGone && isFullFetch && totalBytes > 0) setCachedFullMedia(cacheKey, Buffer.concat(chunks, totalBytes));
+      } catch (streamErr) {
+        request.log.error(streamErr);
+        if (!res.writableEnded) res.destroy();
+      }
+      return;
     } catch (err) {
       request.log.error(err);
       return reply.code(404).send();
@@ -761,7 +901,7 @@ export async function registerContentLibraryRoutes(app: FastifyInstance) {
   // de "reenviado de", igual que pide el usuario.
   app.post("/api/accounts/:id/content-group/send-once", async (request, reply) => {
     const { id } = request.params as { id: string };
-    const body = request.body as { chatId?: string; messageId?: number | string };
+    const body = request.body as { chatId?: string; messageId?: number | string; sourceItemId?: number | string };
     if (!body.chatId || body.messageId === undefined || body.messageId === null) {
       return reply.code(400).send({ error: "Falta el chat destino o el contenido a enviar" });
     }
@@ -807,7 +947,7 @@ export async function registerContentLibraryRoutes(app: FastifyInstance) {
           randomId: generateRandomBigInt(),
         })
       );
-      await logContentSend(id, body.chatId, sendResult);
+      await logContentSend(id, body.chatId, sendResult, body.sourceItemId !== undefined ? String(body.sourceItemId) : String(body.messageId));
       return { ok: true };
     } catch (err: any) {
       request.log.error(err);
@@ -817,7 +957,7 @@ export async function registerContentLibraryRoutes(app: FastifyInstance) {
 
   app.post("/api/accounts/:id/content-group/send", async (request, reply) => {
     const { id } = request.params as { id: string };
-    const body = request.body as { chatId?: string; messageIds?: number[] };
+    const body = request.body as { chatId?: string; messageIds?: number[]; sourceItemId?: number | string };
     if (!body.chatId || !body.messageIds || body.messageIds.length === 0) {
       return reply.code(400).send({ error: "Falta el chat destino o el contenido a enviar" });
     }
@@ -832,7 +972,7 @@ export async function registerContentLibraryRoutes(app: FastifyInstance) {
         fromPeer: sourceEntity,
         dropAuthor: true, // llega como si lo hubiese enviado la modelo, sin "reenviado de"
       });
-      await logContentSend(id, body.chatId, sendResult);
+      await logContentSend(id, body.chatId, sendResult, body.sourceItemId !== undefined ? String(body.sourceItemId) : String(body.messageIds[0]));
       return { ok: true };
     } catch (err: any) {
       request.log.error(err);

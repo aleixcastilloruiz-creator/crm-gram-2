@@ -57,7 +57,7 @@ async function registerAuthRoutes(app) {
         // también desde el navegador", se le corta aquí mismo, antes de darle
         // ninguna cookie.
         if (!worker.canUseBrowser && !(0, auth_1.isDesktopAppRequest)(request)) {
-            return reply.code(403).send({ error: "Esta cuenta solo puede entrar desde la aplicación de escritorio de LUREQO CRM." });
+            return reply.code(403).send({ error: "Esta cuenta solo puede entrar desde la aplicación de escritorio de LUREQO." });
         }
         let token;
         try {
@@ -159,7 +159,7 @@ async function registerAuthRoutes(app) {
         // "Solo app de escritorio" (ver comentario igual en /api/auth/login más
         // arriba).
         if (!worker.canUseBrowser && !(0, auth_1.isDesktopAppRequest)(request)) {
-            return reply.code(403).send({ error: "Esta cuenta solo puede entrar desde la aplicación de escritorio de LUREQO CRM." });
+            return reply.code(403).send({ error: "Esta cuenta solo puede entrar desde la aplicación de escritorio de LUREQO." });
         }
         let workerToken;
         try {
@@ -217,7 +217,7 @@ async function registerAuthRoutes(app) {
                 agencyId: owner.agencyId,
                 viewingOwnAgency: isLegacyAgency,
                 // Marca blanca: ninguna agencia que no sea la tuya (legacy-agency)
-                // debe ver el logo/nombre de LUREQO CRM en ningún sitio del
+                // debe ver el logo/nombre de LUREQO en ningún sitio del
                 // panel (pestaña del navegador, barra lateral, topbar móvil...) -
                 // ver applyBranding en app.js. agencyName ya es ownerName de arriba
                 // (el nombre de SU agencia) cuando no es legacy.

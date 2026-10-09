@@ -7,6 +7,30 @@ import { attachLiveEvents, detachLiveEvents } from "./liveEvents";
 import { clearDialogsCache } from "./dialogsCache";
 import { prisma } from "../utils/prisma";
 
+// Sin esto, un client.connect() que se queda colgado (red rara, un
+// handshake MTProto que nunca termina de resolver) dejaba SIN NINGÚN
+// LÍMITE DE TIEMPO la promesa que devuelve getAccountClient() - y casi
+// NINGÚN sitio que la llama (44 sitios en toda la API, ver mensajes.ts) la
+// envuelve en su propio withTimeout, así que esa petición se quedaba
+// "Cargando..." para siempre, sin error, y sin que invalidateAccountClient
+// ni el barrido de zombies pudieran hacer nada (un cliente a medio
+// conectar nunca llega a marcarse `connected`, así que el barrido -que solo
+// vigila conexiones YA abiertas- ni lo ve). Esto se vio reportado como que
+// a algunas creadoras concretas "no le cargan los chats nunca", incluso
+// después de reconectar la cuenta desde cero. Con esto, connect() SIEMPRE
+// se resuelve o falla en un tiempo acotado, así que cualquier petición que
+// dependa de getAccountClient() también lo hace.
+function withConnectTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("TIMEOUT: la conexión con Telegram tardó demasiado")), ms);
+    promise.then(
+      (v) => { clearTimeout(timer); resolve(v); },
+      (e) => { clearTimeout(timer); reject(e); }
+    );
+  });
+}
+const CONNECT_TIMEOUT_MS = 40_000;
+
 /**
  * Pool de conexiones Telegram: UNA conexion MTProto persistente por
  * cuenta, reutilizada por todas sus campañas (en vez de abrir/cerrar una
@@ -55,7 +79,7 @@ const connecting = new Map<string, Promise<TelegramClient>>();
 const shadowModeCache = new Map<string, { enabled: boolean; at: number }>();
 const SHADOW_MODE_CACHE_MS = 30 * 1000;
 
-async function isShadowModeEnabled(agencyId: string): Promise<boolean> {
+export async function isShadowModeEnabled(agencyId: string): Promise<boolean> {
   const cached = shadowModeCache.get(agencyId);
   if (cached && Date.now() - cached.at < SHADOW_MODE_CACHE_MS) {
     return cached.enabled;
@@ -109,6 +133,14 @@ setInterval(() => {
   }
 }, 3 * 60 * 1000);
 
+// Cuentas que HAN estado conectadas en este proceso y que nadie ha cerrado a
+// propósito (closeAccountClient las quita). El vigilante de abajo las
+// reconecta solo si se caen (zombi descartada por el barrido, corte de red...)
+// en vez de esperar a que un chatter abra esa cuenta y se coma la espera.
+const wantConnected = new Set<string>();
+// Reintentos con espera creciente por cuenta, para no martillear a Telegram.
+const reconnectState = new Map<string, { fails: number; nextAt: number }>();
+
 async function createClient(account: Account): Promise<TelegramClient> {
   if (!apiId || !apiHash) {
     throw new Error("TELEGRAM_API_ID / TELEGRAM_API_HASH no configurados en el entorno");
@@ -118,9 +150,19 @@ async function createClient(account: Account): Promise<TelegramClient> {
     connectionRetries: 5,
     autoReconnect: true,
   });
-  await client.connect();
+  try {
+    await withConnectTimeout(client.connect(), CONNECT_TIMEOUT_MS);
+  } catch (err) {
+    // No se deja a medio conectar en ningún sitio: ni se añadió todavía al
+    // pool (eso pasa justo debajo, solo si connect() tuvo éxito), así que
+    // solo hace falta intentar cerrar lo que GramJS haya llegado a abrir.
+    client.disconnect().catch(() => {});
+    throw err;
+  }
   pool.set(account.id, client);
   poolAgencyByAccountId.set(account.id, account.agencyId);
+  wantConnected.add(account.id);
+  reconnectState.delete(account.id);
   // Enchufa el listener de mensajes en tiempo real (Mensajes -> tiempo real).
   attachLiveEvents(account.id, client);
   await applyShadowStatus(client, account.agencyId);
@@ -188,6 +230,28 @@ export function getAccountClient(account: Account): Promise<TelegramClient> {
  * SIGUIENTE petición ya crea una conexión nueva en vez de reintentar contra
  * la misma rota.
  */
+/**
+ * Estado de conexión REAL (lo que de verdad sabe este proceso ahora mismo,
+ * no un campo cacheado en la base de datos) para pintar en el frontend si
+ * una cuenta está conectada a Telegram o no. Antes el listado de cuentas
+ * solo miraba `account.health` (OK/PEER_FLOOD_PAUSED/DISABLED), un campo
+ * que SOLO cambia en el login inicial y en el ciclo de peerFlood - si la
+ * sesión se invalidaba por otra vía (revocada desde el móvil, zombi
+ * detectada por el barrido de abajo, AUTH_KEY_*) la cuenta seguía
+ * devolviendo "health: OK" para siempre, así que en el panel se veía
+ * "conectada" aunque llevara horas sin poder hablar con Telegram de
+ * verdad. "unknown" es a propósito un tercer estado (ni verde ni rojo):
+ * una cuenta que esta agencia aún no ha usado en este arranque del
+ * servidor no tiene por qué estar mal, solo no se ha comprobado todavía -
+ * tratarla como "desconectada" sería tan engañoso como el bug que esto
+ * arregla.
+ */
+export function getAccountConnectionStatus(accountId: string): "connected" | "disconnected" | "unknown" {
+  const client = pool.get(accountId);
+  if (!client) return "unknown";
+  return client.connected ? "connected" : "disconnected";
+}
+
 export function invalidateAccountClient(accountId: string): void {
   const client = pool.get(accountId);
   if (!client) return;
@@ -200,8 +264,77 @@ export function invalidateAccountClient(accountId: string): void {
   client.disconnect().catch(() => {});
 }
 
+/**
+ * Barrido periódico de conexiones "zombi" (ver comentario grande de
+ * invalidateAccountClient, justo arriba): hasta ahora, una conexión rota
+ * SOLO se detectaba cuando una petición de un chatter chocaba con ella de
+ * verdad y esperaba el timeout entero (hasta 2 minutos) antes de
+ * descartarla - así es como "Lara"/"Alexia" se quedaban sin cargar NADA de
+ * forma persistente (ni chats ni fotos) aunque se reconectara la cuenta
+ * entera desde cero: la sesión nueva se guardaba bien, pero la conexión
+ * VIEJA zombi seguía en el pool (invalidateAccountClient solo se llama
+ * desde el catch de los endpoints, nunca sola) y cada petición volvía a
+ * chocar con ella. En los logs de Railway esto se vio como un aluvión de
+ * "Error: TIMEOUT" desde dentro de la propia librería de Telegram
+ * (client/updates.js) sin parar, cada pocos segundos: la conexión
+ * intentaba sola reconectar/sincronizar una y otra vez y nunca lo lograba,
+ * pero como eso no pasa por ningún endpoint nuestro, invalidateAccountClient
+ * nunca llegaba a llamarse para ella.
+ *
+ * Este barrido hace, cada par de minutos, una llamada barata y de solo
+ * lectura (updates.GetState - lo mismo que usa cualquier cliente de
+ * Telegram para "comprobar que sigues ahí") a cada conexión que YA está
+ * abierta en el pool; si no contesta a tiempo, se da por zombi y se
+ * descarta aquí mismo. Así la PRÓXIMA petición de cualquier chatter ya se
+ * encuentra una conexión nueva en vez de ser quien "descubre" la rota y
+ * paga la espera. No abre conexiones nuevas, no manda nada, no toca el
+ * arranque/reconexión de cuentas (eso sigue con su propio ritmo pausado a
+ * propósito, ver warmUpDialogsCache en index.ts) - solo vigila lo que ya
+ * estaba conectado.
+ */
+const ZOMBIE_SWEEP_INTERVAL_MS = 2 * 60 * 1000;
+const ZOMBIE_PING_TIMEOUT_MS = 15_000;
+
+function withZombiePingTimeout<T>(promise: Promise<T>): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("ZOMBIE_PING_TIMEOUT")), ZOMBIE_PING_TIMEOUT_MS);
+    promise.then(
+      (v) => { clearTimeout(timer); resolve(v); },
+      (e) => { clearTimeout(timer); reject(e); }
+    );
+  });
+}
+
+async function sweepZombieConnections(): Promise<void> {
+  // En paralelo, no una cuenta detras de otra: con el timeout de 15s por
+  // cuenta, bastaban 2-3 conexiones zombi para que el barrido entero
+  // tardase 30-45s en lugar de como mucho 15s, dejando esas cuentas
+  // "colgadas" (sin descartarse para reconectar) mas tiempo del necesario.
+  await Promise.all(
+    [...pool.entries()].map(async ([accountId, client]) => {
+      if (!client.connected) return; // esto ya se nota solo (p.ej. autoReconnect en marcha), no hace falta tocarlo aqui
+      try {
+        await withZombiePingTimeout(client.invoke(new Api.updates.GetState()));
+      } catch {
+        // No contesto a tiempo (o devolvio un error de conexion real): zombi
+        // confirmada, se descarta para que la siguiente peticion cree una
+        // conexion nueva en vez de chocar otra vez con esta.
+        invalidateAccountClient(accountId);
+      }
+    })
+  );
+}
+
+setInterval(() => {
+  sweepZombieConnections().catch(() => {
+    // best-effort: un fallo barriendo no debe tumbar nada, se reintenta solo en el proximo ciclo
+  });
+}, ZOMBIE_SWEEP_INTERVAL_MS);
+
 /** Cierra y quita del pool la conexion de una cuenta concreta (ej. al desactivarla). */
 export async function closeAccountClient(accountId: string): Promise<void> {
+  wantConnected.delete(accountId);
+  reconnectState.delete(accountId);
   detachLiveEvents(accountId);
   clearDialogsCache(accountId);
   const client = pool.get(accountId);
@@ -218,4 +351,111 @@ export async function closeAccountClient(accountId: string): Promise<void> {
 export async function closeAllAccountClients(): Promise<void> {
   const ids = [...pool.keys()];
   await Promise.all(ids.map((id) => closeAccountClient(id)));
+}
+
+
+// ---------------------------------------------------------------------------
+// Reconexión automática de cuentas
+// ---------------------------------------------------------------------------
+// Antes, una cuenta que se caía (conexión zombi descartada por el barrido,
+// corte de red, despliegue) se quedaba "fuera del CRM" hasta que alguien abría
+// sus chats: mientras tanto no llegaban sus mensajes en tiempo real ni el
+// detector de pagos. Ahora un vigilante la reconecta solo, una a una, con
+// espera creciente si falla, y sin tocar las que Telegram ha dejado sin
+// sesión (esas hay que volver a iniciarlas a mano con "Reconectar cuenta").
+// OJO: solo CONECTA - no pide chats ni diálogos (eso fue justo lo que, en
+// cada arranque, parecía limitar cuentas, ver comentario en index.ts).
+
+const DEAD_SESSION_RE = /AUTH_KEY_UNREGISTERED|SESSION_REVOKED|SESSION_EXPIRED|USER_DEACTIVATED|AUTH_KEY_INVALID/;
+const WATCHDOG_INTERVAL_MS = 2 * 60 * 1000;
+const RECONNECT_GAP_MS = 8_000; // respiro entre cuenta y cuenta
+const RECONNECT_BACKOFF_BASE_MS = 30_000;
+const RECONNECT_BACKOFF_MAX_MS = 15 * 60 * 1000;
+
+function sleepMs(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+let watchdogRunning = false;
+
+async function reconnectOne(accountId: string): Promise<void> {
+  const state = reconnectState.get(accountId) ?? { fails: 0, nextAt: 0 };
+  try {
+    const account = await prisma.account.findUnique({ where: { id: accountId } });
+    if (!account || account.health === "DISABLED") {
+      wantConnected.delete(accountId);
+      reconnectState.delete(accountId);
+      return;
+    }
+    await getAccountClient(account);
+    reconnectState.delete(accountId);
+    console.log(`[reconnect] "${account.label}" reconectada.`);
+  } catch (err: any) {
+    const msg = String(err?.errorMessage || err?.message || err);
+    if (DEAD_SESSION_RE.test(msg)) {
+      // Sesión muerta de verdad: reintentar no sirve, hay que re-loguear.
+      wantConnected.delete(accountId);
+      reconnectState.delete(accountId);
+      console.error(`[reconnect] ${accountId}: sesión inválida (${msg}), hay que usar "Reconectar cuenta".`);
+      return;
+    }
+    const fails = state.fails + 1;
+    const wait = Math.min(RECONNECT_BACKOFF_MAX_MS, RECONNECT_BACKOFF_BASE_MS * 2 ** (fails - 1));
+    reconnectState.set(accountId, { fails, nextAt: Date.now() + wait });
+    console.error(`[reconnect] ${accountId}: fallo ${fails} (${msg}); reintento en ${Math.round(wait / 1000)}s.`);
+  }
+}
+
+async function reconnectDroppedAccounts(): Promise<void> {
+  if (watchdogRunning) return;
+  watchdogRunning = true;
+  try {
+    for (const accountId of [...wantConnected]) {
+      const existing = pool.get(accountId);
+      if (existing && existing.connected) continue;
+      if (connecting.has(accountId)) continue;
+      const st = reconnectState.get(accountId);
+      if (st && Date.now() < st.nextAt) continue;
+      await reconnectOne(accountId);
+      await sleepMs(RECONNECT_GAP_MS);
+    }
+  } finally {
+    watchdogRunning = false;
+  }
+}
+
+if (process.env.LUXE_AUTO_RECONNECT !== "0") {
+  setInterval(() => {
+    reconnectDroppedAccounts().catch(() => {});
+  }, WATCHDOG_INTERVAL_MS);
+}
+
+/**
+ * Tras cada arranque del servidor (railway up), reconecta las cuentas una a
+ * una y despacio, SOLO conectando. Se espera un rato antes de empezar para que
+ * el contenedor anterior ya esté apagado del todo: dos procesos con la misma
+ * sesión a la vez es lo que provoca AUTH_KEY_DUPLICATED y tira la cuenta.
+ * Se puede desactivar poniendo LUXE_AUTO_RECONNECT=0 en las variables de Railway.
+ */
+export async function reconnectAllAccountsGently(initialDelayMs = 90_000): Promise<void> {
+  if (process.env.LUXE_AUTO_RECONNECT === "0") return;
+  await sleepMs(initialDelayMs);
+  try {
+    const accounts = await prisma.account.findMany({
+      where: { health: { not: "DISABLED" } },
+      select: { id: true, label: true, sessionString: true },
+      orderBy: { label: "asc" },
+    });
+    for (const a of accounts) {
+      if (!a.sessionString) continue;
+      const existing = pool.get(a.id);
+      if (existing && existing.connected) continue;
+      await reconnectOne(a.id);
+      if (reconnectState.has(a.id)) wantConnected.add(a.id); // falló por red: que el vigilante siga intentándolo
+      await sleepMs(RECONNECT_GAP_MS);
+    }
+    console.log(`[reconnect] arranque: revisadas ${accounts.length} cuenta(s).`);
+  } catch (err) {
+    console.error("[reconnect] fallo en la reconexión de arranque:", err);
+  }
 }

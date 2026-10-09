@@ -70,49 +70,51 @@ export async function registerTelegramFolderRoutes(app: FastifyInstance) {
       const match = folders.find((f) => f.title.toLowerCase() === decodedFolder.toLowerCase());
       if (!match) return reply.code(404).send({ error: "Carpeta no encontrada" });
 
-      let chats = await mapWithConcurrency(match.chatIds, 6, async (chatId) => {
-        try {
-          const entity = await client.getEntity(chatId);
-          const title = (entity as any).title ?? (entity as any).username ?? (entity as any).firstName ?? String(chatId);
-          const isForum = (entity as any).forum === true;
-          return { chatId: String(chatId), title, isForum };
-        } catch {
-          return { chatId: String(chatId), title: "(no se pudo resolver)", isForum: false };
-        }
-      });
+      const resolveAll = async (ids: string[]) =>
+        mapWithConcurrency(ids, 6, async (chatId) => {
+          try {
+            const entity = await client.getEntity(chatId);
+            const title = (entity as any).title ?? (entity as any).username ?? (entity as any).firstName ?? String(chatId);
+            const isForum = (entity as any).forum === true;
+            return { chatId: String(chatId), title, isForum };
+          } catch {
+            return { chatId: String(chatId), title: "(no se pudo resolver)", isForum: false };
+          }
+        });
+
+      let chats = await resolveAll(match.chatIds);
 
       // Un chat "(no se pudo resolver)" normalmente no es un chat roto de
       // verdad, sino que GramJS todavia no tiene el access_hash de ese chat
-      // en su cache local (le pasa sobre todo a chats privados con fans que
-      // esta cuenta no ha "visto" desde que se reinicio el proceso, aunque
-      // la carpeta sea grande y tenga cientos) - mismo fallo que ya se
-      // arreglo para el envio del Reenviador (ver resolveChatEntity en
-      // sender.ts). Aqui, en vez de reintentar chat por chat, se refresca la
-      // lista de dialogos UNA vez si hizo falta y se reintentan solo los que
-      // fallaron - mucho mas barato que un getDialogs por cada chat.
-      const unresolved = chats.filter((c) => c.title === "(no se pudo resolver)").map((c) => c.chatId);
-      if (unresolved.length > 0) {
+      // en su cache local (le pasa sobre todo justo despues de un deploy/
+      // reinicio del servidor, con la cache de entidades en frio, o con
+      // chats privados que esta cuenta no ha "visto" recientemente) - mismo
+      // fallo que ya se arreglo para el envio del Reenviador (ver
+      // resolveChatEntity en sender.ts). Antes se intentaba refrescar UNA
+      // vez con un limite de 400 dialogos, que se quedaba corto justo en el
+      // caso que mas falla (cuenta recien reiniciada, con decenas/cientos
+      // de chats sin resolver) - "creaba la campaña bien, pero con menos
+      // destinos de los que tenia la carpeta de verdad". Ahora se reintenta
+      // en un par de rondas con un limite mucho mayor, y solo si de verdad
+      // no hay manera se deja lo que quede sin resolver (y se avisa, en vez
+      // de desaparecer en silencio - ver unresolvedCount en la respuesta).
+      for (const dialogsLimit of [800, 3000]) {
+        const unresolved = chats.filter((c) => c.title === "(no se pudo resolver)").map((c) => c.chatId);
+        if (unresolved.length === 0) break;
         try {
-          await client.getDialogs({ limit: 400 });
-          const retried = await mapWithConcurrency(unresolved, 6, async (chatId) => {
-            try {
-              const entity = await client.getEntity(chatId);
-              const title = (entity as any).title ?? (entity as any).username ?? (entity as any).firstName ?? String(chatId);
-              const isForum = (entity as any).forum === true;
-              return { chatId: String(chatId), title, isForum };
-            } catch {
-              return null;
-            }
-          });
-          const retriedById = new Map(retried.filter((r): r is NonNullable<typeof r> => r !== null).map((r) => [r.chatId, r]));
-          chats = chats.map((c) => retriedById.get(c.chatId) ?? c);
+          await client.getDialogs({ limit: dialogsLimit });
         } catch {
           // el refresco de dialogos en si fallo (cuenta desconectada, etc.) - se deja lo que ya se tenia
+          break;
         }
+        const retried = await resolveAll(unresolved);
+        const retriedById = new Map(retried.map((r) => [r.chatId, r]));
+        chats = chats.map((c) => retriedById.get(c.chatId) ?? c);
       }
 
+      const unresolvedCount = chats.filter((c) => c.title === "(no se pudo resolver)").length;
       folderChatsCache.set(cacheKey, { at: Date.now(), chats });
-      return { chats };
+      return { chats, unresolvedCount };
     } catch (err) {
       request.log.error(err);
       return reply.code(502).send({ error: "No se pudo leer la carpeta desde Telegram." });

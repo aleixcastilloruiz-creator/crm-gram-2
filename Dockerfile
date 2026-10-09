@@ -38,9 +38,10 @@ COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
 COPY prisma ./prisma
 COPY public ./public
+COPY public-crm ./public-crm
 # Plantillas de documentos (p.ej. la de Nóminas, templates/payroll-template.docx):
 # no es código TypeScript, así que tsc no la toca - hay que copiarla a mano.
 COPY templates ./templates
 
 EXPOSE 4000
-CMD ["sh", "-c", "npx prisma db push --skip-generate --accept-data-loss && node dist/index.js"]
+CMD ["sh", "-c", "npx prisma db push --skip-generate && node dist/index.js"]

@@ -17,6 +17,8 @@ const fullMediaCache_1 = require("../telegram/fullMediaCache");
 const waNotify_1 = require("../whatsapp/waNotify");
 const auth_1 = require("../utils/auth");
 const paymentDetector_1 = require("../utils/paymentDetector");
+const agencyContext_1 = require("../utils/agencyContext");
+const perfSamples_1 = require("../telegram/perfSamples");
 // Sin @types propios: se usa via require, la libreria en si es JS puro (no
 // necesita compilar nada nativo en Railway).
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -557,6 +559,18 @@ function extractSentMessageIds(result) {
  * (modelo), igual que en el panel de referencia.
  */
 async function registerMessagesRoutes(app) {
+    // Panel de medicion temporal (ver telegram/perfSamples.ts): cuanto esta
+    // tardando HOY, de verdad, cada llamada a Telegram para abrir un chat
+    // (getMessages) y para enviar un mensaje (sendMessage) - el "antes" que
+    // hace falta tener para decidir con datos (no a ojo) si merece la pena
+    // construir un cache local de mensajes. Sin `:id` en la URL (es un
+    // resumen de TODAS las cuentas de la agencia), asi que se filtra aqui
+    // mismo por agencia en vez de depender del guardia general de index.ts.
+    app.get("/api/perf/messages", async (request) => {
+        const agencyId = await (0, agencyContext_1.agencyIdFromRequest)(request);
+        const accounts = await prisma_1.prisma.account.findMany({ where: { agencyId }, select: { id: true } });
+        return (0, perfSamples_1.getPerfStats)(new Set(accounts.map((a) => a.id)));
+    });
     app.get("/api/accounts/:id/dialogs", async (request, reply) => {
         const { id } = request.params;
         const q = request.query;
@@ -922,10 +936,23 @@ async function registerMessagesRoutes(app) {
             const client = await (0, connectionPool_1.getAccountClient)(account);
             const entity = await withTimeout((0, dialogs_1.resolveDialogEntity)(client, id, chatId), 35_000, "abriendo la conversación");
             const limit = Math.min(Number(q.limit) || 60, 200);
+            const getMessagesStartedAt = Date.now();
             const raw = await withTimeout(client.getMessages(entity, {
                 limit,
                 offsetId: q.offsetId ? Number(q.offsetId) : undefined,
             }), 35_000, "cargando los mensajes");
+            // Medicion temporal (ver telegram/perfSamples.ts): cuanto tarda HOY
+            // Telegram en devolver el historial de un chat, para tener un "antes"
+            // real antes de decidir si hace falta guardar los mensajes en BD en
+            // vez de pedirlos siempre en vivo. Solo mide, no cambia nada del
+            // comportamiento.
+            (0, perfSamples_1.recordPerfSample)("getMessages", id, chatId, Date.now() - getMessagesStartedAt);
+            // "Tick de leído" (✓✓ como Telegram/TeleCrew): hasta qué id de mensaje
+            // saliente nuestro ha confirmado Telegram que el fan ha leído en este
+            // chat (ver UpdateReadHistoryOutbox en telegram/liveEvents.ts). 0 =
+            // sin ningún aviso de lectura todavía (desde que arrancó el servidor):
+            // el frontend lo pinta como un solo ✓ (enviado), no como no-leído.
+            const readMaxId = (0, liveEvents_1.getOutboxReadMaxId)(id, chatId);
             const messages = raw
                 .filter((m) => m.message || m.media)
                 .map((m) => {
@@ -935,6 +962,9 @@ async function registerMessagesRoutes(app) {
                     text: m.message || "",
                     out: !!m.out,
                     date: m.date ? new Date(m.date * 1000).toISOString() : null,
+                    // Solo tiene sentido para los nuestros (out=true) - el frontend
+                    // ignora este campo en los mensajes entrantes.
+                    read: !!m.out && readMaxId > 0 && m.id <= readMaxId,
                     // El archivo en si se pide luego a /gallery/:id/thumb y
                     // /gallery/:id/media (mismos endpoints que la Galeria, ya
                     // funcionan para cualquier mensaje con media de este chat).
@@ -944,6 +974,26 @@ async function registerMessagesRoutes(app) {
             })
                 .reverse(); // mas antiguo primero, para pintar de arriba a abajo
             (0, dialogsCache_1.markDialogRead)(id, chatId);
+            // Confirmación de lectura REAL a Telegram: a petición expresa de
+            // Aitor (antes el "modo shadow" bloqueaba esto siempre, para
+            // cualquier agencia, sin opción - ver el comentario grande de
+            // applyShadowStatus en connectionPool.ts). Ahora, SOLO para las
+            // agencias que tengan el modo shadow desactivado en Configuración, al
+            // abrir un chat aquí se le dice a Telegram de verdad "esto está
+            // leído" - así la propia app de Telegram del móvil (y el fan) quedan
+            // sincronizados con lo que se hace desde el panel, en vez de quedarse
+            // con burbujas de no-leído "fantasma" para siempre. Con el modo
+            // shadow activado (el valor de siempre) no cambia nada: sigue sin
+            // mandarse jamás, igual que hasta ahora. Fire-and-forget y en un
+            // try/catch aparte: si esto falla (FLOOD_WAIT puntual, etc.) no debe
+            // tirar abajo la respuesta de los mensajes, que ya se tienen listos.
+            (0, connectionPool_1.isShadowModeEnabled)(account.agencyId)
+                .then((shadow) => {
+                if (shadow)
+                    return;
+                return client.markAsRead(entity).catch(() => { });
+            })
+                .catch(() => { });
             return { messages, hasMore: raw.length >= limit };
         }
         catch (err) {
@@ -972,10 +1022,14 @@ async function registerMessagesRoutes(app) {
         try {
             const client = await (0, connectionPool_1.getAccountClient)(account);
             const entity = await (0, dialogs_1.resolveDialogEntity)(client, id, chatId);
+            const sendStartedAt = Date.now();
             await client.sendMessage(entity, {
                 message: trimmed,
                 formattingEntities: formattingEntities.length > 0 ? formattingEntities : undefined,
             });
+            // Medicion temporal (ver telegram/perfSamples.ts) - mismo motivo que
+            // en GET .../messages, aqui para el tramo de ENVIAR.
+            (0, perfSamples_1.recordPerfSample)("sendMessage", id, chatId, Date.now() - sendStartedAt);
             logChatterMessage({
                 accountId: id,
                 chatId,
@@ -2505,6 +2559,83 @@ async function registerMessagesRoutes(app) {
         });
         syncFanToTelegramFolder(app, id, chatId, body.list);
         return { ok: true };
+    });
+    // Notificaciones de escritorio con varias creadoras a la vez (pedido de
+    // Aitor: un chatter con acceso a 2, 4, 5 o 6 modelos en Mensajes Pro debe
+    // recibir el aviso de mensaje nuevo como en Telegram Desktop, aunque la
+    // creadora que acaba de recibirlo no sea la pestaña que tiene delante
+    // ahora mismo). UNA sola conexión SSE multiplexa los eventos de TODAS las
+    // cuentas a las que quien pregunta tiene acceso, en vez de abrir una
+    // conexión por cuenta - eso sí agotaría pronto el límite de conexiones
+    // por origen del navegador con varias creadoras (ver el comentario del
+    // mismo problema, para "Abrir en ventana nueva", en el stream de una sola
+    // cuenta justo debajo). El permiso (qué cuentas puede ver) es EL MISMO
+    // criterio que /api/mensajes-pro/accounts: por WorkerPermission si hay
+    // trabajador (según se pida por /api o por /pro/api), todas si es el
+    // dueño/admin.
+    app.get("/api/accounts/live-stream", async (request, reply) => {
+        const worker = await (0, auth_1.getWorkerFromRequest)(request);
+        let accountRows;
+        if (worker) {
+            const isPro = (request.raw.url || "").startsWith("/pro/");
+            const perms = await prisma_1.prisma.workerPermission.findMany({
+                where: { workerId: worker.id, section: isPro ? "mensajes-pro" : "mensajes" },
+                include: { account: { select: { id: true, label: true } } },
+            });
+            accountRows = perms.map((p) => p.account);
+        }
+        else {
+            accountRows = await prisma_1.prisma.account.findMany({ select: { id: true, label: true } });
+        }
+        if (accountRows.length === 0) {
+            reply.code(200).send({ error: "Sin cuentas accesibles." });
+            return;
+        }
+        reply.hijack();
+        reply.raw.writeHead(200, {
+            "Content-Type": "text/event-stream",
+            "Cache-Control": "no-cache, no-transform",
+            Connection: "keep-alive",
+            "X-Accel-Buffering": "no",
+        });
+        reply.raw.write("retry: 2000\n\n");
+        // Asegura que cada cuenta tiene su cliente (y su listener en vivo) ya
+        // conectado, en paralelo - igual que hace el stream de una sola cuenta,
+        // pero para varias a la vez, para no sumar la espera de cada una.
+        await Promise.all(accountRows.map(async ({ id: accountId }) => {
+            try {
+                const account = await prisma_1.prisma.account.findUnique({ where: { id: accountId } });
+                if (account)
+                    await (0, connectionPool_1.getAccountClient)(account);
+            }
+            catch (err) {
+                request.log.error(err);
+            }
+        }));
+        const unsubscribes = accountRows.map(({ id: accountId }) => (0, liveEvents_1.subscribeToAccountEvents)(accountId, (evt) => {
+            try {
+                // El título del chat se manda ya resuelto desde aquí (cache de
+                // dialogos del backend) para que el frontend no tenga que
+                // adivinarlo - en Mensajes Pro puede llegar un evento de una
+                // creadora que ni siquiera tiene pestaña abierta todavía.
+                const chatTitle = evt.type === "message" ? (0, dialogsCache_1.getCachedDialogTitle)(accountId, evt.chatId) : undefined;
+                reply.raw.write(`data: ${JSON.stringify({ ...evt, accountId, chatTitle })}\n\n`);
+            }
+            catch {
+                // conexion cerrada: el "close" de abajo limpia todo
+            }
+        }));
+        const keepAlive = setInterval(() => {
+            try {
+                reply.raw.write(": ping\n\n");
+            }
+            catch { /* conexion cerrada */ }
+        }, 20000);
+        request.raw.on("close", () => {
+            clearInterval(keepAlive);
+            for (const unsub of unsubscribes)
+                unsub();
+        });
     });
     // Stream en tiempo real (Server-Sent Events) de mensajes nuevos de esta
     // cuenta: cuando llega o se envia un mensaje de Telegram, se empuja aqui

@@ -6,7 +6,13 @@
  * contenedor con cientos de fotos.
  */
 
-const MAX_ENTRIES = 400;
+// Antes 400: compartido entre avatares de chat Y miniaturas de la bóveda de
+// contenido, una carpeta con 60-80+ archivos podia desalojar ella sola las
+// miniaturas de otras carpetas ya vistas (y los avatares de la lista de
+// chats), forzando redescargas constantes de Telegram y haciendo que la
+// bóveda se sintiera lenta cada vez que se cambiaba de carpeta. Son buffers
+// pequeños (miniaturas comprimidas), así que subir el tope es barato.
+const MAX_ENTRIES = 2000;
 const cache = new Map<string, Buffer>();
 
 export function getCachedMedia(key: string): Buffer | undefined {

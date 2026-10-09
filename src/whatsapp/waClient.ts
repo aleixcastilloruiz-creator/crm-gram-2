@@ -50,6 +50,16 @@ const waState: WaState = {
 
 const logger = pino({ level: "silent" });
 
+// Si el servidor no logra siquiera hablar con WhatsApp (bloqueo de red de
+// Railway hacia sus servidores, etc.), el socket de Baileys puede quedarse
+// colgado sin más: ni "qr" ni "close" llegan nunca, así que sin esto
+// "Vinculación" se queda en "Conectando..." para siempre y no hay ningún
+// error que ver (justo lo que se reportó: "pone conectando y nunca llega a
+// conectar"). Pasado este tiempo sin noticias, se da por fallida y se
+// vuelve a "Sin vincular" con un error visible, para poder reintentar en
+// vez de quedarse atascado sin explicación.
+const CONNECT_TIMEOUT_MS = 30_000;
+
 export function getWhatsAppStatus() {
   return {
     status: waState.status,
@@ -77,10 +87,50 @@ export function startWhatsAppConnection(): Promise<void> {
   return waState.connectingPromise;
 }
 
+// Distingue cada intento de conexión del siguiente (reintentos automáticos
+// tras un "close" pasajero incluidos - ver más abajo), para que el
+// cronómetro de un intento viejo nunca pueda tocar el estado de uno nuevo
+// que ya esté en marcha.
+let connectGeneration = 0;
+
 async function doConnect(): Promise<void> {
+  const myGeneration = ++connectGeneration;
+  waState.status = "connecting";
+  waState.lastError = null;
+
+  // El cronómetro se arma AQUÍ, antes de cualquier llamada de red (incluida
+  // la propia comprobación de versión de Baileys, fetchLatestBaileysVersion,
+  // que habla con los servidores de WhatsApp ANTES de abrir el socket) -
+  // antes se armaba después de crear el socket, así que si esa comprobación
+  // de versión se quedaba colgada (el mismo bloqueo de red sospechado desde
+  // el principio) el código ni siquiera llegaba a crear el cronómetro, y
+  // "Conectando..." se quedaba atascado para siempre sin que el timeout
+  // tuviera ninguna oportunidad de actuar - justo lo que seguía pasando con
+  // el intento anterior de arreglo.
+  let sockRef: WASocket | null = null;
+  const connectTimeout = setTimeout(() => {
+    // Si ya hay un intento de conexión más nuevo en marcha (reintento tras
+    // un "close" pasajero, o se pulsó "Conectar" otra vez), o si para
+    // entonces ya hubo "qr"/"open"/"close" de este mismo intento, este
+    // timeout no hace nada - solo actúa si de verdad nunca llegó ninguna
+    // noticia de este intento concreto.
+    if (connectGeneration !== myGeneration || waState.status !== "connecting") return;
+    waState.status = "disconnected";
+    waState.sock = null;
+    waState.lastError = "WhatsApp no respondió a tiempo al intentar vincular (puede ser un bloqueo de red del servidor hacia los servidores de WhatsApp). Puedes volver a pulsar «Conectar».";
+    // Se invalida ESTE intento antes de forzar el cierre: sockRef.end() dispara
+    // el "connection.update" de close normal de Baileys, y ese handler, al ver
+    // que no fue un logout de verdad, reconectaba solo de inmediato (era la
+    // reconexion automatica de "corte de red pasajero") - borrando en el acto
+    // el "disconnected"+lastError que se acaba de poner aqui y devolviendo todo
+    // a "Conectando..." otra vez, sin que se notara nunca desde fuera (el bucle
+    // se repetia solo). Al subir connectGeneration, ese "close" ya no coincide
+    // con el intento que lo provocó y el handler lo ignora sin reconectar.
+    connectGeneration++;
+    if (sockRef) { try { sockRef.end(new Error("CONNECT_TIMEOUT")); } catch { /* best effort, ya se va a descartar */ } }
+  }, CONNECT_TIMEOUT_MS);
+
   try {
-    waState.status = "connecting";
-    waState.lastError = null;
     const { state, saveCreds } = await useDbAuthState();
     const { version } = await fetchLatestBaileysVersion().catch(() => ({ version: undefined as any }));
 
@@ -97,12 +147,24 @@ async function doConnect(): Promise<void> {
       version,
     };
     const sock = makeWASocket(socketOptions);
+    sockRef = sock;
     waState.sock = sock;
 
     sock.ev.on("creds.update", saveCreds);
 
     sock.ev.on("connection.update", (update) => {
+      if (connectGeneration !== myGeneration) return; // intento viejo: ya no manda
       const { connection, lastDisconnect, qr } = update;
+      // OJO: Baileys manda "connection.update" con connection:"connecting"
+      // repetidas veces mientras reintenta POR DENTRO (su propio reintento,
+      // antes de darse por vencido con un "close" de verdad) - si se
+      // cancelara el cronometro aqui con CUALQUIER evento, cada uno de esos
+      // avisos de "sigo intentando" lo reiniciaba y el timeout no llegaba a
+      // cumplirse nunca. Solo se cancela ante una noticia de verdad: hay QR,
+      // se abrió, o se cerró.
+      if (qr || connection === "open" || connection === "close") {
+        clearTimeout(connectTimeout);
+      }
       if (qr) {
         waState.status = "qr";
         QRCode.toDataURL(qr, { margin: 1, width: 220 })
@@ -137,6 +199,7 @@ async function doConnect(): Promise<void> {
       }
     });
   } catch (err: any) {
+    clearTimeout(connectTimeout);
     waState.status = "disconnected";
     waState.lastError = err?.message || String(err);
     waState.sock = null;

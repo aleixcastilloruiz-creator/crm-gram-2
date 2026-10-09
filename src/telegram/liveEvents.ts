@@ -1,11 +1,11 @@
-import { TelegramClient, Api } from "telegram";
-import { NewMessage, NewMessageEvent } from "telegram/events";
+import { TelegramClient, Api, utils as telegramUtils } from "telegram";
+import { NewMessage, NewMessageEvent, Raw } from "telegram/events";
 import { touchDialogFromLiveMessage, getCachedDialogTitle } from "./dialogsCache";
+import { persistMessage } from "./messageStore";
 import { prisma } from "../utils/prisma";
 import { prefixFromPhone } from "./phoneCountry";
 import { detectPaymentInMessage } from "../utils/paymentDetector";
 import { isChatMemberOf } from "./promoGroups";
-import { sendWhatsAppNotification } from "../utils/notifications";
 
 /**
  * Puente en tiempo real entre Telegram y el panel: cuando llega o se envia
@@ -26,10 +26,41 @@ export interface LiveMessageEvent {
   };
 }
 
-type Listener = (event: LiveMessageEvent) => void;
+/** "Tick de leído" (como Telegram/TeleCrew): se emite cuando el FAN lee
+ * alguno de nuestros mensajes salientes en ese chat (ver
+ * UpdateReadHistoryOutbox más abajo). El frontend, al recibirlo, vuelve a
+ * pedir los mensajes del chat abierto (igual que ya hace con "message") para
+ * repintar los ticks - no hace falta mandar el maxId por aquí, ver
+ * getOutboxReadMaxId. */
+export interface LiveReadEvent {
+  type: "read";
+  chatId: string;
+}
+
+type Listener = (event: LiveMessageEvent | LiveReadEvent) => void;
 
 const listeners = new Map<string, Set<Listener>>();
 const attachedAccounts = new Set<string>();
+
+/** "Tick de leído": hasta qué id de mensaje saliente (nuestro, m.out=true) ha
+ * leído el fan en cada chat, por cuenta. Solo en memoria (se vacía con cada
+ * despliegue, igual que otras caches "mejor esfuerzo" de este fichero) -
+ * basta con que Telegram mande un UpdateReadHistoryOutbox nuevo mientras el
+ * servidor está arriba para que el tick se ponga al día; tras un deploy
+ * vuelve a empezar en "✓" (enviado) hasta el siguiente aviso de lectura, sin
+ * que eso rompa nada. Solo cubre chats privados (1:1, el caso de "Mensajes"
+ * con fans) - los grupos/canales usan un update distinto
+ * (UpdateReadChannelOutbox) que no se trata aquí a propósito, fuera de
+ * alcance de "tick de leído en el chat con el fan".
+ */
+const outboxReadMaxId = new Map<string, Map<string, number>>(); // accountId -> chatId -> maxId
+
+/** Hasta qué id de mensaje saliente ha leído el fan en este chat (0 = nunca
+ * se ha visto ningún aviso de lectura desde que arrancó el servidor - el
+ * frontend lo trata como "todavía sin confirmar", un solo ✓). */
+export function getOutboxReadMaxId(accountId: string, chatId: string): number {
+  return outboxReadMaxId.get(accountId)?.get(chatId) || 0;
+}
 
 export function subscribeToAccountEvents(accountId: string, listener: Listener): () => void {
   let set = listeners.get(accountId);
@@ -57,9 +88,30 @@ function emit(accountId: string, chatId: string, message: Api.Message) {
   };
   // Mantiene la lista de conversaciones al dia sin volver a pedirsela a Telegram.
   touchDialogFromLiveMessage(accountId, chatId, payload.message);
+  // Guarda este mensaje en la copia local (ver telegram/messageStore.ts) en
+  // cuanto llega - de cualquier lado (fan, trabajador desde el CRM, o la
+  // propia creadora desde su móvil) - para que la próxima vez que se abra
+  // este chat ya esté aquí sin tener que volver a pedírselo a Telegram.
+  // Fire-and-forget: nunca debe retrasar el aviso en vivo al frontend.
+  persistMessage(accountId, chatId, message);
 
   const set = listeners.get(accountId);
   if (!set || set.size === 0) return;
+  for (const l of set) {
+    try {
+      l(payload);
+    } catch {
+      // un listener roto no debe tumbar al resto
+    }
+  }
+}
+
+/** Avisa a quien esté escuchando esta cuenta de que el fan ha leído (al
+ * menos) hasta cierto punto de un chat - ver LiveReadEvent arriba. */
+function emitRead(accountId: string, chatId: string) {
+  const set = listeners.get(accountId);
+  if (!set || set.size === 0) return;
+  const payload: LiveReadEvent = { type: "read", chatId };
   for (const l of set) {
     try {
       l(payload);
@@ -77,55 +129,6 @@ function emit(accountId: string, chatId: string, message: Api.Message) {
  * ya quedó marcado (auto-bloqueado o desbloqueado a mano), y nunca debe
  * tumbar el resto del puente en vivo si algo falla.
  */
-function isIncomingPrivateMessage(message: Api.Message): boolean {
-  if (message.out) return false;
-  const peer = (message as any).peerId;
-  if (peer?.className) return peer.className === "PeerUser";
-  const chatId = (message as any).chatId;
-  return !!chatId && Number(chatId) > 0;
-}
-
-/**
- * Aviso personal por WhatsApp cuando un cliente escribe en un chat 1:1.
- * Nunca avisa de grupos/canales ni de mensajes enviados por la propia cuenta.
- * Usa el numero `notifyWhatsAppTo` ya existente en la configuracion de cada
- * cuenta, por lo que no hace falta crear otra tabla ni cambiar el esquema.
- */
-async function maybeNotifyPrivateMessage(accountId: string, chatId: string, message: Api.Message) {
-  try {
-    if (!isIncomingPrivateMessage(message)) return;
-
-    const account = await prisma.account.findUnique({
-      where: { id: accountId },
-      select: { label: true, notifyWhatsAppTo: true },
-    });
-    if (!account?.notifyWhatsAppTo) return;
-
-    let sender: any = null;
-    try { sender = await (message as any).getSender(); } catch { sender = null; }
-
-    const firstName = sender?.firstName || "";
-    const lastName = sender?.lastName || "";
-    const fullName = `${firstName} ${lastName}`.trim();
-    const username = sender?.username ? `@${sender.username}` : "";
-    const senderLabel = fullName || username || "Cliente";
-    const text = (message.message || (message.media ? "[archivo adjunto]" : "")).trim();
-    const preview = text.length > 1800 ? `${text.slice(0, 1800)}…` : text;
-
-    const lines = [
-      "🔔 Nuevo mensaje de cliente",
-      `👤 ${senderLabel}${username && fullName ? ` (${username})` : ""}`,
-      `📱 Cuenta: ${account.label}`,
-      preview ? `💬 ${preview}` : "💬 [archivo adjunto]",
-    ];
-
-    await sendWhatsAppNotification(account.notifyWhatsAppTo, lines.join("\n"));
-  } catch (err) {
-    // El aviso es best-effort: WhatsApp nunca debe afectar la conexión de Telegram.
-    console.error("[notifications] error avisando de mensaje privado:", err);
-  }
-}
-
 async function maybeAutoBlockByCountry(accountId: string, client: TelegramClient, chatId: string, message: Api.Message) {
   try {
     if (message.out) return;
@@ -298,7 +301,6 @@ export function attachLiveEvents(accountId: string, client: TelegramClient): voi
       emit(accountId, chatId, message);
       // No se espera (fire-and-forget): el bloqueo por país y el detector de
       // pagos nunca deben retrasar la actualización en vivo del chat.
-      maybeNotifyPrivateMessage(accountId, chatId, message);
       maybeAutoBlockByCountry(accountId, client, chatId, message);
       maybeDetectPayment(accountId, chatId, message);
       maybeAttributePromoGroups(accountId, client, chatId, message);
@@ -307,9 +309,60 @@ export function attachLiveEvents(accountId: string, client: TelegramClient): voi
     }
   }, new NewMessage({}));
 
-  // Nota: esta version de GramJS no expone un evento "EditedMessage" propio;
-  // los mensajes editados no se emiten en vivo (solo los nuevos), pero se
-  // veran igualmente al reabrir/recargar la conversacion.
+  // Mensajes EDITADOS: igual que el "tick de leído" de más abajo, esta
+  // version de GramJS no expone un evento "EditedMessage" de alto nivel
+  // propio, así que se engancha con Raw({}) y se filtra a mano por
+  // className. Antes esto no se trataba para nada (el comentario que había
+  // aquí decía literalmente que una edición solo se veía "al
+  // reabrir/recargar la conversación") - eso era tolerable mientras CADA
+  // apertura de chat volvía a pedirle el historial entero a Telegram, pero
+  // deja de serlo con la copia local (ver telegram/messageStore.ts): si un
+  // chat ya está guardado, reabrirlo NUNCA vuelve a tocar Telegram, así que
+  // sin esto una edición se quedaría mal para siempre. Se trata (persiste +
+  // se avisa en vivo al frontend) exactamente igual que un mensaje nuevo.
+  const handleEditUpdate = (update: Api.UpdateEditMessage | Api.UpdateEditChannelMessage) => {
+    try {
+      const message = update.message;
+      if (!message || message.className !== "Message") return; // MessageEmpty/MessageService: nada que guardar
+      const chatId = resolveChatId(message as Api.Message);
+      if (!chatId) return;
+      emit(accountId, chatId, message as Api.Message);
+    } catch {
+      // no dejamos que un fallo de parseo tumbe la conexion
+    }
+  };
+  client.addEventHandler((update: Api.TypeUpdate) => {
+    if (update.className === "UpdateEditMessage" || update.className === "UpdateEditChannelMessage") {
+      handleEditUpdate(update as Api.UpdateEditMessage | Api.UpdateEditChannelMessage);
+    }
+  }, new Raw({}));
+
+  // "Tick de leído" (✓✓ como Telegram/TeleCrew): UpdateReadHistoryOutbox es
+  // el aviso de MTProto de que el OTRO lado (el fan) ha leído nuestros
+  // mensajes salientes hasta cierto id, en un chat privado. No tiene su
+  // propio "event builder" en GramJS (a diferencia de NewMessage), así que
+  // se engancha con Raw({}) -recibe TODOS los updates crudos- y se filtra a
+  // mano por className, igual que se hace en el resto del proyecto cuando
+  // hace falta un dato que GramJS no envuelve en un evento de alto nivel.
+  client.addEventHandler((update: Api.TypeUpdate) => {
+    try {
+      if (update.className !== "UpdateReadHistoryOutbox") return;
+      const u = update as Api.UpdateReadHistoryOutbox;
+      const chatId = telegramUtils.getPeerId(u.peer).toString();
+      let perChat = outboxReadMaxId.get(accountId);
+      if (!perChat) {
+        perChat = new Map();
+        outboxReadMaxId.set(accountId, perChat);
+      }
+      const prevMax = perChat.get(chatId) || 0;
+      if (u.maxId > prevMax) {
+        perChat.set(chatId, u.maxId);
+        emitRead(accountId, chatId);
+      }
+    } catch {
+      // no dejamos que un fallo de parseo tumbe la conexion
+    }
+  }, new Raw({}));
 }
 
 export function detachLiveEvents(accountId: string): void {

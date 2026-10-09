@@ -1,4 +1,4 @@
-# LUREQO CRM — Motor "Reenviador"
+# LUREQO — Motor "Reenviador"
 
 Backend del motor de reenvío/publicación automática para Telegram: multi-cuenta,
 multi-campaña (carpetas de destino), modo Aleatorio y modo Horarios fijos,
@@ -24,7 +24,7 @@ docker compose up -d --build
 Esto levanta 3 contenedores: `db` (Postgres), `backend` (el motor, puerto
 4000) y `adminer` (interfaz web para ver la base de datos sin instalar
 nada, en `http://tu-servidor:8080` — sistema PostgreSQL, servidor `db`,
-usuario `luxe`, base de datos `luxe_crm`).
+usuario `luxe`, base de datos `lureqo_crm`).
 
 Para dar de alta una cuenta (login de Telegram) dentro del contenedor ya
 desplegado:

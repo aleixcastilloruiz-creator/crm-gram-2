@@ -180,6 +180,62 @@ export async function registerInformesRoutes(app: FastifyInstance) {
   // Los mensajes solo empiezan a aparecer desde que se desplegó esto (no
   // hay forma de reconstruir el historial de chat de antes), igual que ya
   // pasaba con "Acumulado anterior al CRM" en las ventas.
+  // Informes → Dashboard → Mensajes borrados: lo que los chatters (o el
+  // dueño) han borrado desde el CRM, con el texto original, el fan, quién lo
+  // envió, quién lo borró y las horas.
+  app.get("/api/informes/deleted-messages", async (request) => {
+    const q = request.query as { from?: string; to?: string; q?: string; chatter?: string; accountId?: string };
+    const from = q.from ? startOfDay(q.from) : null;
+    const to = q.to ? endOfDay(q.to) : null;
+    const search = (q.q || "").trim().toLowerCase();
+    const agencyId = await agencyIdFromRequest(request);
+    const dateWhere: any = {};
+    if (from) dateWhere.gte = from;
+    if (to) dateWhere.lte = to;
+    const [accounts, rows] = await Promise.all([
+      prisma.account.findMany({ where: { agencyId }, select: { id: true, label: true }, orderBy: { label: "asc" } }),
+      prisma.deletedMessageLog.findMany({
+        where: {
+          account: { agencyId },
+          ...(q.accountId ? { accountId: q.accountId } : {}),
+          ...(Object.keys(dateWhere).length ? { deletedAt: dateWhere } : {}),
+          ...(q.chatter ? { deletedBy: q.chatter } : {}),
+        },
+        orderBy: { deletedAt: "desc" },
+        take: 501,
+      }),
+    ]);
+    const accountLabel = new Map(accounts.map((a) => [a.id, a.label]));
+    const allChatters = await prisma.deletedMessageLog.findMany({
+      where: { account: { agencyId } },
+      select: { deletedBy: true },
+      distinct: ["deletedBy"],
+    });
+    let list = rows.map((r) => ({
+      id: r.id,
+      accountId: r.accountId,
+      chatId: r.chatId,
+      creadora: accountLabel.get(r.accountId) || r.accountId,
+      fan: r.chatTitle || r.chatId,
+      mensaje: r.message,
+      mediaType: r.mediaType,
+      enviadoPor: r.sentBy,
+      borradoPor: r.deletedBy,
+      enviadoEn: r.sentAt,
+      borradoEn: r.deletedAt,
+    }));
+    if (search) {
+      list = list.filter((r) => `${r.mensaje} ${r.fan} ${r.borradoPor} ${r.enviadoPor || ""}`.toLowerCase().includes(search));
+    }
+    const hasMore = list.length > 500;
+    return {
+      rows: list.slice(0, 500),
+      hasMore,
+      chatters: allChatters.map((c) => c.deletedBy).sort(),
+      accounts,
+    };
+  });
+
   app.get("/api/informes/dashboard", async (request) => {
     const q = request.query as { from?: string; to?: string; q?: string; chatter?: string; accountId?: string; limit?: string };
     const from = q.from ? startOfDay(q.from) : null;

@@ -152,6 +152,27 @@ const FETCH_LIMIT = 600; // suficiente para incluir historial antiguo + reciente
 // note el hueco y le de a "Recargar chats" a mano: se reintenta solo.
 const LOW_COUNT_RETRY_THRESHOLD = 15;
 function refresh(client, accountId, entry, includeAllGroups = false) {
+    // Burbuja de "no leído" que no se quitaba: Telegram NUNCA se entera de que
+    // un chat se ha leído desde aquí (ver "modo shadow" en connectionPool.ts -
+    // a propósito, para que el fan no vea "visto"), así que su propio
+    // unreadCount para ese chat no baja jamás. markDialogRead (más abajo) lo
+    // ponía a 0 en la cache/BD, pero este refresco (cada 3 min, o al forzar
+    // "Recargar chats", o al detectar un chat nuevo) volvía a pedirle la lista
+    // entera a Telegram y SOBREESCRIBÍA ese 0 con el número crudo de Telegram
+    // de nuevo - la burbuja "revivía" sola sin que el trabajador hiciera nada
+    // raro. Antes de pisar entry.dialogs, nos guardamos el unreadCount que ya
+    // llevábamos nosotros (mantenido al día en touchEntry con cada mensaje en
+    // vivo, y puesto a 0 en markDialogRead) y lo restauramos por chat después
+    // - solo se acepta el número crudo de Telegram para un chat que no
+    // teníamos todavía en la cache (de verdad nuevo para nosotros, no hay otro
+    // dato mejor). Si en el hueco entre dos refrescos llegó un mensaje nuevo
+    // que no se vio en vivo (servidor caído, evento perdido...), se detecta
+    // porque cambia lastMessageDate del propio chat y se suma 1 en vez de
+    // dejar el contador vencido en 0 - no es exacto si llegó más de un
+    // mensaje en ese hueco, pero es muchísimo mejor que o bien quedarse en 0
+    // (como si nada hubiera llegado) o bien que vuelva el número de Telegram,
+    // que nunca refleja lo ya leído aquí.
+    const previousByChatId = new Map(entry.dialogs.map((d) => [d.chatId, d]));
     const promise = (async () => {
         let dialogs = await (0, dialogs_1.listDialogs)(client, accountId, FETCH_LIMIT, entry.extraChatIds, includeAllGroups);
         if (dialogs.length < LOW_COUNT_RETRY_THRESHOLD) {
@@ -163,6 +184,13 @@ function refresh(client, accountId, entry, includeAllGroups = false) {
             catch {
                 // si el reintento falla, nos quedamos con lo que ya teniamos de la primera pasada
             }
+        }
+        for (const d of dialogs) {
+            const prev = previousByChatId.get(d.chatId);
+            if (!prev)
+                continue; // chat nuevo para nosotros: no hay mejor dato que el crudo de Telegram
+            const missedIncoming = !d.lastMessageOut && d.lastMessageDate && d.lastMessageDate !== prev.lastMessageDate;
+            d.unreadCount = missedIncoming ? prev.unreadCount + 1 : prev.unreadCount;
         }
         entry.dialogs = dialogs;
         entry.loadedAt = Date.now();

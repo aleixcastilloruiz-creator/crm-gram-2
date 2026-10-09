@@ -92,6 +92,16 @@ function dialogKind(dialog: any): "user" | "group" | "channel" {
  * de cada cliente (se añaden solos, ver messages.ts) y las carpetas marcadas
  * a mano en Configuración → "Mostrar también en Mensajes". "Mensajes" es el
  * chat con fans, NO todos los grupos/canales de la cuenta de Telegram. */
+const mutedUntil = new Map<string, number>(); // accountId|chatId -> ms hasta el que esta silenciado
+function setChatMuted(accountId: string, chatId: string, until: number) {
+  if (until > 0) mutedUntil.set(accountId + "|" + chatId, until);
+  else mutedUntil.delete(accountId + "|" + chatId);
+}
+export function isChatMuted(accountId: string, chatId: string): boolean {
+  const u = mutedUntil.get(accountId + "|" + chatId);
+  return !!u && u > Date.now();
+}
+
 export async function listDialogs(
   client: TelegramClient,
   accountId: string,
@@ -138,6 +148,10 @@ export async function listDialogs(
       continue;
     }
     cache.set(chatId, entity);
+    try {
+      const mu = (dialog as any).dialog?.notifySettings?.muteUntil;
+      setChatMuted(accountId, chatId, typeof mu === "number" && mu * 1000 > Date.now() ? mu * 1000 : 0);
+    } catch {}
 
     const msg = dialog.message as Api.Message | undefined;
     out.push({

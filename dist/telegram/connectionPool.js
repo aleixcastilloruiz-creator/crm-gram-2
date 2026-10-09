@@ -1,5 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.isShadowModeEnabled = isShadowModeEnabled;
 exports.setShadowModeEnabled = setShadowModeEnabled;
 exports.getAccountClient = getAccountClient;
 exports.invalidateAccountClient = invalidateAccountClient;
@@ -197,6 +198,62 @@ function invalidateAccountClient(accountId) {
     // la próxima petición no la reutilice.
     client.disconnect().catch(() => { });
 }
+/**
+ * Barrido periódico de conexiones "zombi" (ver comentario grande de
+ * invalidateAccountClient, justo arriba): hasta ahora, una conexión rota
+ * SOLO se detectaba cuando una petición de un chatter chocaba con ella de
+ * verdad y esperaba el timeout entero (hasta 2 minutos) antes de
+ * descartarla - así es como "Lara"/"Alexia" se quedaban sin cargar NADA de
+ * forma persistente (ni chats ni fotos) aunque se reconectara la cuenta
+ * entera desde cero: la sesión nueva se guardaba bien, pero la conexión
+ * VIEJA zombi seguía en el pool (invalidateAccountClient solo se llama
+ * desde el catch de los endpoints, nunca sola) y cada petición volvía a
+ * chocar con ella. En los logs de Railway esto se vio como un aluvión de
+ * "Error: TIMEOUT" desde dentro de la propia librería de Telegram
+ * (client/updates.js) sin parar, cada pocos segundos: la conexión
+ * intentaba sola reconectar/sincronizar una y otra vez y nunca lo lograba,
+ * pero como eso no pasa por ningún endpoint nuestro, invalidateAccountClient
+ * nunca llegaba a llamarse para ella.
+ *
+ * Este barrido hace, cada par de minutos, una llamada barata y de solo
+ * lectura (updates.GetState - lo mismo que usa cualquier cliente de
+ * Telegram para "comprobar que sigues ahí") a cada conexión que YA está
+ * abierta en el pool; si no contesta a tiempo, se da por zombi y se
+ * descarta aquí mismo. Así la PRÓXIMA petición de cualquier chatter ya se
+ * encuentra una conexión nueva en vez de ser quien "descubre" la rota y
+ * paga la espera. No abre conexiones nuevas, no manda nada, no toca el
+ * arranque/reconexión de cuentas (eso sigue con su propio ritmo pausado a
+ * propósito, ver warmUpDialogsCache en index.ts) - solo vigila lo que ya
+ * estaba conectado.
+ */
+const ZOMBIE_SWEEP_INTERVAL_MS = 2 * 60 * 1000;
+const ZOMBIE_PING_TIMEOUT_MS = 15_000;
+function withZombiePingTimeout(promise) {
+    return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("ZOMBIE_PING_TIMEOUT")), ZOMBIE_PING_TIMEOUT_MS);
+        promise.then((v) => { clearTimeout(timer); resolve(v); }, (e) => { clearTimeout(timer); reject(e); });
+    });
+}
+async function sweepZombieConnections() {
+    for (const [accountId, client] of [...pool.entries()]) {
+        if (!client.connected)
+            continue; // esto ya se nota solo (p.ej. autoReconnect en marcha), no hace falta tocarlo aqui
+        try {
+            await withZombiePingTimeout(client.invoke(new telegram_1.Api.updates.GetState()));
+        }
+        catch {
+            // No contesto a tiempo (o devolvio un error de conexion real): zombi
+            // confirmada, se descarta para que la siguiente peticion cree una
+            // conexion nueva en vez de chocar otra vez con esta.
+            invalidateAccountClient(accountId);
+        }
+    }
+}
+setInterval(() => {
+    sweepZombieConnections().catch(() => {
+        // best-effort: un fallo barriendo no debe tumbar nada, se reintenta solo en el proximo ciclo
+    });
+}, ZOMBIE_SWEEP_INTERVAL_MS);
 /** Cierra y quita del pool la conexion de una cuenta concreta (ej. al desactivarla). */
 async function closeAccountClient(accountId) {
     (0, liveEvents_1.detachLiveEvents)(accountId);

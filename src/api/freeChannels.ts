@@ -12,8 +12,15 @@ import { getCachedMedia, setCachedMedia } from "../telegram/mediaCache";
  * tener que abrir Telegram. Tambien "Precios" de Configuración → Modelos,
  * que vive aqui por ser parte de la misma pantalla de configuracion.
  */
-export async function registerFreeChannelRoutes(app: FastifyInstance) {
-  // --- Precios (Configuración → Modelos → creadora) ---
+// "Precios modelo" (Configuración → Modelos → creadora, y ahora también su
+// propia pestaña en Mensajes/Mensajes Pro, dentro del panel de notas del
+// chat): se registra COMO SU PROPIO plugin, aparte del resto de Canales
+// free, para poder exigirle acceso a Mensajes de esa cuenta
+// (requireSectionAccess, ver index.ts) sin abrirle también Canales free a
+// cualquier chatter - antes esta ruta no tenía ningún guardia de
+// trabajador propio (solo pasaba o no el candado general de Basic Auth),
+// así que de entrada no era alcanzable por ningún trabajador con cookie.
+export async function registerAccountPricesRoutes(app: FastifyInstance) {
   app.get("/api/accounts/:id/prices", async (request) => {
     const { id } = request.params as { id: string };
     const account = await prisma.account.findUniqueOrThrow({ where: { id } });
@@ -26,7 +33,9 @@ export async function registerFreeChannelRoutes(app: FastifyInstance) {
     await prisma.account.update({ where: { id }, data: { pricesInfo: prices ?? "" } });
     return { ok: true };
   });
+}
 
+export async function registerFreeChannelRoutes(app: FastifyInstance) {
   // --- Lista de canales free de una cuenta ---
   app.get("/api/accounts/:id/free-channels", async (request, reply) => {
     const { id } = request.params as { id: string };

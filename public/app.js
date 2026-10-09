@@ -1,4 +1,4 @@
-// Panel Reenviador — LUREQO CRM
+// Panel Reenviador — LUREQO
 // SPA en JS puro (sin build step). Todo vive dentro de "Reenviador"; el
 // resto de secciones del sidebar son visuales (aun no construidas).
 
@@ -25,6 +25,63 @@ if (mobileNavBackdropEl) {
   mobileNavBackdropEl.addEventListener("click", closeMobileNav);
 }
 
+// ---------- Paneles redimensionables (lista de modelos, lista de chats,
+// notas) ----------
+// A algunos chatters/Team líderes les resultaba todo muy apretado (varias
+// columnas fijas a la vez: menú, cuentas, chats, conversación, notas). En
+// vez de imponer un tamaño, cada persona arrastra el borde entre dos
+// columnas y lo deja a su gusto - se guarda en SU propio navegador
+// (localStorage), nunca en la cuenta ni compartido con el resto del equipo,
+// así que el dueño, un Team líder y un Chatter pueden tener cada uno sus
+// anchos preferidos sin pisarse.
+//
+// handleEl: el div.resize-handle de por medio.
+// cssVar: variable CSS (en :root) que controla el ancho de la columna de la
+// izquierda del handle - cambiarla ahí basta, el CSS ya la usa como width.
+// storageKey: dónde se guarda el ancho elegido.
+function initPanelResizer(handleEl, cssVar, storageKey, { min, max, default: def }) {
+  if (!handleEl) return;
+  const saved = Number(localStorage.getItem(storageKey));
+  const initial = Number.isFinite(saved) && saved >= min && saved <= max ? saved : def;
+  document.documentElement.style.setProperty(cssVar, initial + "px");
+
+  let dragging = false;
+  let startX = 0;
+  let startWidth = initial;
+
+  handleEl.addEventListener("mousedown", (e) => {
+    dragging = true;
+    startX = e.clientX;
+    startWidth = parseInt(getComputedStyle(document.documentElement).getPropertyValue(cssVar), 10) || def;
+    document.body.classList.add("panel-resizing");
+    e.preventDefault();
+  });
+  window.addEventListener("mousemove", (e) => {
+    if (!dragging) return;
+    const next = Math.min(max, Math.max(min, startWidth + (e.clientX - startX)));
+    document.documentElement.style.setProperty(cssVar, next + "px");
+  });
+  window.addEventListener("mouseup", () => {
+    if (!dragging) return;
+    dragging = false;
+    document.body.classList.remove("panel-resizing");
+    const current = parseInt(getComputedStyle(document.documentElement).getPropertyValue(cssVar), 10);
+    if (Number.isFinite(current)) localStorage.setItem(storageKey, String(current));
+  });
+  // Doble clic en el borde: vuelve al ancho de siempre, por si alguien lo
+  // deja demasiado estrecho/ancho sin querer.
+  handleEl.addEventListener("dblclick", () => {
+    document.documentElement.style.setProperty(cssVar, def + "px");
+    localStorage.setItem(storageKey, String(def));
+  });
+}
+
+initPanelResizer(document.getElementById("accountListResizer"), "--accountlist-w", "luxe_panel_w_accountlist", {
+  min: 140,
+  max: 360,
+  default: 200,
+});
+
 let state = {
   accounts: [],
   currentAccountId: null,
@@ -42,7 +99,7 @@ let state = {
   isSuperAdmin: false, // multi-agencia: solo true para PANEL_USERNAME/PANEL_PASSWORD de Railway (ve "Agencias" en el menú)
   viewingOwnAgency: true, // false si el súper-admin ha entrado a "Ver datos" de otra agencia (ver fetchWorkerSession/renderSidenav)
   // Marca blanca: true = esta sesión es de tu propia agencia (legacy-agency,
-  // la única que ve "LUREQO CRM") - false = una agencia invitada o
+  // la única que ve "LUREQO") - false = una agencia invitada o
   // uno de sus trabajadores, que en vez de eso ve agencyBrandName (su
   // propio nombre) y ningún logo (ver applyBranding).
   isLegacyAgency: true,
@@ -403,6 +460,7 @@ const SECTIONS = [
   { key: "revision", label: "Revisión", icon: "📋", enabled: false },
   { key: "informes", label: "Informes", icon: "📊", enabled: true },
   { key: "configuracion", label: "Configuración", icon: "⚙️", enabled: true },
+  { key: "ayuda", label: "Ayuda", icon: "❓", enabled: true },
 ];
 
 // Dentro de "Mensajes" la barra se minimiza a solo iconos (como en el panel
@@ -511,6 +569,9 @@ function renderSidenav() {
   // solo el dueño/admin, nunca un trabajador (a un trabajador siempre se le
   // arma renderWorkerRestrictedShell() en su lugar, ver init())-, así que no
   // hace falta ninguna comprobación de rol aparte aquí.
+  navRerender = renderSidenav;
+  sidenavEl.appendChild(buildThemeNavItem(collapsed));
+
   const shadowTooltip = collapsed ? { "data-tooltip": "Modo shadow" } : {};
   sidenavEl.appendChild(el("a", {
     class: "nav-item shadow-mode-item" + (state.shadowModeEnabled ? " shadow-mode-on" : ""),
@@ -542,6 +603,31 @@ function renderSidenav() {
  * cuentas ya conectadas al momento (y para las que se conecten después,
  * mientras siga activo) - ver POST /api/settings/shadow-mode y
  * connectionPool.ts. */
+/** Modo oscuro/claro: se guarda en localStorage (por navegador) y se aplica
+ * con data-theme en <html> (ver bloque "Modo oscuro" de style.css). */
+let navRerender = null; // re-dibuja la barra lateral que esté activa (dueño o trabajador)
+
+function buildThemeNavItem(collapsed) {
+  const darkOn = document.documentElement.getAttribute("data-theme") === "dark";
+  return el("a", {
+    class: "nav-item",
+    href: "#",
+    ...(collapsed ? { "data-tooltip": "Modo oscuro" } : {}),
+    onclick: (e) => { e.preventDefault(); toggleTheme(); },
+  }, [
+    el("span", { class: "nav-icon" }, darkOn ? "☀️" : "🌙"),
+    el("span", { class: "nav-label" }, darkOn ? "Modo claro" : "Modo oscuro"),
+  ]);
+}
+
+function toggleTheme() {
+  const goDark = document.documentElement.getAttribute("data-theme") !== "dark";
+  if (goDark) document.documentElement.setAttribute("data-theme", "dark");
+  else document.documentElement.removeAttribute("data-theme");
+  try { localStorage.setItem("luxe_theme", goDark ? "dark" : "light"); } catch {}
+  if (navRerender) navRerender();
+}
+
 async function toggleShadowMode() {
   const next = !state.shadowModeEnabled;
   try {
@@ -595,7 +681,282 @@ function goToView(view) {
     openPagosView();
   } else if (view === "agencias") {
     openAgenciasView();
+  } else if (view === "ayuda") {
+    openAyuda();
   }
+}
+
+// ---------- Ayuda (preguntas frecuentes, visible para cualquier rol) ----------
+// A diferencia del resto de secciones, esta la ve también un Chatter o Team
+// líder tal cual (ver renderWorkerNav más abajo), por eso vive como función
+// aparte en vez de colgar de ninguna de las vistas "solo dueño". El
+// contenido es fijo (no depende de la cuenta ni de la agencia); lo único
+// que habla con el backend es el formulario de contacto de abajo del todo.
+// La mitad larga de esta lista está pensada para quien más usa el apartado
+// de Ayuda: Team líder y, sobre todo, Chatter (atienden chats todo el día
+// y son quienes menos partes del panel han tocado) - por eso no aparece
+// nada de lo que un Chatter ni siquiera tiene en su menú (Reenviador,
+// Detector de pagos, Cuentas de Telegram, Equipo... todo eso es solo del
+// Dueño/Jefe, ver renderSidenav más arriba). El Dueño/Jefe la ve igual,
+// simplemente no necesita la mitad de estas respuestas.
+// URL del sitio con la guía/manual (ver website/ en el repo, Next.js export
+// estático servido por este mismo servidor en /crm - ver backend/src/index.ts).
+// Ruta relativa a propósito: así funciona igual en luxefan.es que en
+// cualquier otro dominio/puerto donde corra el backend (local, staging...).
+const AYUDA_GUIDE_BASE_URL = "/crm";
+const AYUDA_GUIDES = [
+  {
+    title: "Manual del chatter",
+    subtitle: "Cada botón de la app explicado",
+    url: AYUDA_GUIDE_BASE_URL + "/manual-del-chatter/",
+  },
+  {
+    title: "Primeros pasos",
+    subtitle: "Conectar cuentas, invitar al equipo...",
+    url: AYUDA_GUIDE_BASE_URL + "/primeros-pasos/",
+  },
+  {
+    title: "Qué hace LUREQO CRM",
+    subtitle: "La guía completa, con ejemplos",
+    url: AYUDA_GUIDE_BASE_URL + "/que-hace/",
+  },
+];
+
+const AYUDA_FAQ = [
+  {
+    q: "¿Cómo apunto una venta?",
+    a: "Desde el chat del fan (o desde Pagos) pulsa «Registrar venta» y apunta el servicio, el importe, la fecha y quién la hizo.",
+  },
+  {
+    q: "¿Cómo le mando contenido de la bóveda a un fan?",
+    a: "Con el botón de contenido del cuadro de escribir se abre la bóveda. Todo lo que se manda a un fan sale de ahí, no se adjuntan archivos sueltos del ordenador.",
+  },
+  {
+    q: "¿Cómo mando algo para ver una vez (que se autodestruya)?",
+    a: "Al elegir la foto o el vídeo de la bóveda para mandarlo, marca la casilla «🔥 Enviar para ver una vez». Se autodestruye en cuanto el fan lo abre.",
+  },
+  {
+    q: "¿Cómo uso las respuestas rápidas?",
+    a: "Escribe «/» en el cuadro de texto y salen los atajos guardados; sigue escribiendo para filtrar. Las crea quien dirige tu agencia.",
+  },
+  {
+    q: "¿Cómo voy directo al grupo restringido de un cliente?",
+    a: "En la cabecera del chat, el icono 👥 «Ir al grupo restringido de este cliente» te lleva directo a su grupo (y lo crea si todavía no existe), sin pasar por la lista de grupos en común.",
+  },
+  {
+    q: "Un filtro de carpeta (Posibles, Clientes...) no me enseña nada, ¿por qué?",
+    a: "Esos filtros usan el nombre real que le pusiste a esa carpeta en tu propio Telegram. Pídele a quien dirige tu agencia que lo configure en Configuración → Carpetas de Telegram.",
+  },
+  {
+    q: "¿Por qué no veo algunos chats en Mensajes?",
+    a: "Mensajes solo enseña las cuentas que tu agencia te ha dado permiso de ver, tus conversaciones privadas con fans en ellas y los grupos pequeños (menos de 3 miembros). Si crees que te falta algo, pregúntale a quien dirige tu agencia.",
+  },
+  {
+    q: "¿Cómo ficho la entrada y la salida?",
+    a: "Con el reloj que sale abajo del menú: fichas la entrada al empezar tu turno y la salida al terminar. De ahí salen tus horas trabajadas, tu rendimiento y tu nómina.",
+  },
+  {
+    q: "¿Cómo hago un descanso (break)?",
+    a: "En el mismo reloj, el botón «☕ Descanso» lo empieza y descuenta de tu cupo del día; pulsa otra vez (o «Terminar descanso») para acabarlo. Si se agota el cupo, no se puede abrir otro hasta el día siguiente.",
+  },
+  {
+    q: "¿Dónde veo los pagos de hoy?",
+    a: "En Pagos: lo que ha entrado hoy por Stripe y PayPal de la agencia. Solo se ve el día en curso; el histórico completo lo lleva quien dirige tu agencia.",
+  },
+  {
+    q: "¿Dónde veo mis nóminas?",
+    a: "En Nóminas: las que tu agencia ya te ha generado, con botones para descargarlas en PDF o Word.",
+  },
+  {
+    q: "¿Dónde veo mi rendimiento?",
+    a: "En Mi rendimiento: tus ventas, tus horas trabajadas y tus mensajes enviados, en el periodo de fechas que elijas.",
+  },
+  {
+    q: "¿Qué es Mensajes Pro?",
+    a: "Otra forma de ver y responder los mismos chats, en una ventana aparte (se abre en otra pestaña) - para no perder velocidad aunque Mensajes esté cargando algo a la vez.",
+  },
+  {
+    q: 'Me aparece "Solo lectura" arriba del todo, ¿qué significa?',
+    a: "Tu agencia te ha dado acceso de solo mirar: puedes ver los chats, pero enviar y guardar no va a funcionar desde tu cuenta. Si crees que es un error, pregúntale a quien dirige tu agencia.",
+  },
+  {
+    q: "¿Qué diferencia hay entre Team líder y Chatter?",
+    a: "El Team líder, además de atender chats, tiene también SFS y Programar posts. El Chatter ve solo Mensajes (de las cuentas que le hayan dado), Pagos de hoy, Nóminas y Mi rendimiento.",
+  },
+  {
+    q: "Soy Team líder, ¿qué es SFS?",
+    a: "Reenvía contenido a un chat o a un grupo/canal fijo de la creadora sin desvelar quién lo manda (pestañas «Chat» y «Grupo SFS»). Solo lo ve el Team líder, nunca el Chatter.",
+  },
+  {
+    q: "Soy Team líder, ¿cómo programo un post?",
+    a: "Desde Programar posts eliges el contenido, la fecha y la hora, y el panel lo publica solo cuando toca - no hace falta estar delante en ese momento. Solo lo ve el Team líder.",
+  },
+];
+
+function renderAyudaView(container) {
+  container.innerHTML = "";
+  const wrap = el("div", { class: "ayuda-view" });
+
+  const header = el("div", { class: "ayuda-header" }, [
+    el("h1", {}, "Ayuda"),
+    el("p", { class: "hint" }, "¿Algo no funciona o no sabes cómo se hace? Escríbenos."),
+  ]);
+  wrap.appendChild(header);
+
+  const searchInput = el("input", { placeholder: "Buscar: venta, bóveda, break, carpeta..." });
+  const listTitle = el("h3", {}, "Preguntas frecuentes");
+  const listEl = el("div", { class: "ayuda-faq-list" });
+
+  function renderList() {
+    listEl.innerHTML = "";
+    const q = searchInput.value.trim().toLowerCase();
+    const items = AYUDA_FAQ.filter(
+      (item) => !q || item.q.toLowerCase().includes(q) || item.a.toLowerCase().includes(q)
+    );
+    if (items.length === 0) {
+      listEl.appendChild(el("div", { class: "empty" }, "No hay ninguna pregunta que coincida. Prueba con otra palabra, o escríbenos abajo."));
+      return;
+    }
+    for (const item of items) {
+      const row = el("div", { class: "accordion-row ayuda-faq-row" }, [
+        el("span", {}, item.q),
+        el("span", { class: "accordion-count ayuda-faq-chevron" }, "›"),
+      ]);
+      const body = el("div", { class: "ayuda-faq-answer hidden" }, item.a);
+      row.addEventListener("click", () => {
+        const open = !body.classList.contains("hidden");
+        body.classList.toggle("hidden", open);
+        row.classList.toggle("ayuda-faq-row-open", !open);
+      });
+      listEl.appendChild(row);
+      listEl.appendChild(body);
+    }
+  }
+  searchInput.addEventListener("input", renderList);
+  renderList();
+
+  const leftCol = el("div", { class: "ayuda-col-main" }, [searchInput, listTitle, listEl]);
+
+  const guidesCard = el("div", { class: "card ayuda-guides-card" }, [
+    el("h3", {}, "Guías"),
+    ...AYUDA_GUIDES.map((g) => {
+      const link = el("div", { class: "ayuda-guide-link", role: "button", tabindex: "0" }, [
+        el("div", { class: "ayuda-guide-link-title" }, g.title),
+        el("div", { class: "ayuda-guide-link-sub" }, g.subtitle),
+      ]);
+      link.addEventListener("click", () => openGuideModal(g));
+      link.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          openGuideModal(g);
+        }
+      });
+      return link;
+    }),
+  ]);
+  const moreCard = el("div", { class: "card ayuda-guides-card" }, [
+    el("h3", {}, "¿No está aquí lo que buscas?"),
+    el("p", { class: "hint" }, "Escríbenos más abajo contándonos qué pantalla estabas mirando y qué esperabas que pasara. Lo lee directamente el equipo."),
+  ]);
+  const rightCol = el("div", { class: "ayuda-col-side" }, [guidesCard, moreCard]);
+
+  wrap.appendChild(el("div", { class: "ayuda-columns" }, [leftCol, rightCol]));
+
+  // ---- "¿No lo encuentras? Escríbenos" ----
+  let kind = "ayuda"; // "ayuda" | "sugerencia"
+  const tabAyuda = el("button", { type: "button", class: "sm primary" }, "🆘 Pedir ayuda");
+  const tabSugerencia = el("button", { type: "button", class: "sm ghost" }, "💡 Sugerir un cambio");
+  const textarea = el("textarea", {
+    rows: "4",
+    placeholder: "Cuéntanos qué pasa: en qué pantalla estabas, qué hiciste y qué esperabas que pasara.",
+  });
+  const sentHint = el("p", { class: "hint" }, "Lo lee directamente el equipo.");
+  const sentList = el("div", { class: "ayuda-sent-list" }, "Todavía nada.");
+  const sendBtn = el("button", { type: "button", class: "primary" }, "Enviar");
+
+  function setKind(next) {
+    kind = next;
+    tabAyuda.className = "sm" + (kind === "ayuda" ? " primary" : " ghost");
+    tabSugerencia.className = "sm" + (kind === "sugerencia" ? " primary" : " ghost");
+  }
+  tabAyuda.addEventListener("click", () => setKind("ayuda"));
+  tabSugerencia.addEventListener("click", () => setKind("sugerencia"));
+
+  sendBtn.addEventListener("click", async () => {
+    const message = textarea.value.trim();
+    if (!message) {
+      toast("Escribe algo antes de enviar", true);
+      return;
+    }
+    sendBtn.disabled = true;
+    try {
+      await api("/help-requests", { method: "POST", body: JSON.stringify({ kind, message }) });
+      if (sentList.textContent === "Todavía nada.") sentList.innerHTML = "";
+      sentList.appendChild(el("div", { class: "ayuda-sent-item" }, (kind === "sugerencia" ? "💡 " : "🆘 ") + message));
+      textarea.value = "";
+      toast("Enviado, gracias");
+    } catch (err) {
+      toast("No se pudo enviar: " + err.message, true);
+    } finally {
+      sendBtn.disabled = false;
+    }
+  });
+
+  const contactCard = el("div", { class: "card ayuda-contact-card" }, [
+    el("h3", {}, "¿No lo encuentras? Escríbenos"),
+    el("div", { class: "ayuda-contact-tabs" }, [tabAyuda, tabSugerencia]),
+    textarea,
+    el("div", { class: "actions" }, [sentHint, sendBtn]),
+    el("h4", {}, "Lo que has enviado"),
+    sentList,
+  ]);
+  wrap.appendChild(contactCard);
+
+  container.appendChild(wrap);
+}
+
+// Abre una guía (de website/) dentro de una ventana flotante del propio CRM,
+// con un iframe a la página ya publicada - así el chatter no tiene que salir
+// de la app ni abrir el navegador para leerla.
+function openGuideModal(guide) {
+  const closeBtn = el("button", { type: "button", class: "ayuda-guide-modal-close", title: "Cerrar" }, "✕");
+  const openTab = el(
+    "a",
+    { class: "ayuda-guide-modal-open", href: guide.url, target: "_blank", rel: "noopener" },
+    "Abrir en pestaña nueva ↗"
+  );
+  const header = el("div", { class: "ayuda-guide-modal-header" }, [
+    el("div", { class: "ayuda-guide-modal-title" }, guide.title),
+    el("div", { class: "ayuda-guide-modal-actions" }, [openTab, closeBtn]),
+  ]);
+  const iframe = el("iframe", {
+    class: "ayuda-guide-modal-iframe",
+    src: guide.url,
+    title: guide.title,
+    loading: "lazy",
+  });
+  const modal = el("div", { class: "ayuda-guide-modal" }, [header, iframe]);
+  const overlay = el("div", { class: "ayuda-guide-modal-overlay" }, [modal]);
+
+  function close() {
+    overlay.remove();
+    document.removeEventListener("keydown", onKey);
+  }
+  function onKey(e) {
+    if (e.key === "Escape") close();
+  }
+  overlay.addEventListener("click", (e) => {
+    if (e.target === overlay) close();
+  });
+  closeBtn.addEventListener("click", close);
+  document.addEventListener("keydown", onKey);
+
+  document.body.appendChild(overlay);
+}
+
+function openAyuda() {
+  accountListEl.innerHTML = "";
+  renderAyudaView(appEl);
 }
 
 // ---------- Agencias (multi-agencia, solo súper-admin) ----------
@@ -626,7 +987,7 @@ function renderAgenciasShell(agencies) {
   appEl.appendChild(el("div", { class: "pd-header" }, [
     el("div", {}, [
       el("h1", {}, "Agencias"),
-      el("p", { class: "subtitle" }, "Invita agencias nuevas para que usen este mismo CRM con su propio panel. Con \"Ver datos\" entras a ver y gestionar todo lo suyo (cuentas, chats, equipo, pagos, nóminas...) exactamente igual que si fueras su dueño - usa \"Volver a tu agencia\" (arriba a la izquierda) para salir. \"Ocultar\" la quita de esta tabla sin tocar su acceso: su equipo sigue entrando y usando el panel exactamente igual."),
+      el("p", { class: "subtitle" }, "Invita agencias nuevas para que usen este mismo CRM con su propio panel. Con \"Ver datos\" entras a ver y gestionar todo lo suyo (cuentas, chats, equipo, pagos, nóminas...) exactamente igual que si fueras su dueño - usa \"Volver a tu agencia\" (arriba a la izquierda) para salir. Esta tabla muestra SIEMPRE todas las agencias dadas de alta, estén \"ocultas\" o no."),
     ]),
   ]));
 
@@ -720,29 +1081,17 @@ function renderAgenciasShell(agencies) {
         viewAsBtn.disabled = false;
       }
     });
-    // Esta tabla nunca trae agencias ocultas (ver openAgenciasView), así
-    // que cualquier fila que se pinte aquí es siempre visible todavía - el
-    // botón solo puede "Ocultar", nunca "Mostrar" (no hay ningún control en
-    // el panel para traerlas de vuelta, a propósito).
-    const hideBtn = el("button", { class: "ghost" }, "Ocultar");
-    hideBtn.addEventListener("click", async () => {
-      hideBtn.disabled = true;
-      try {
-        await api(`/agencies/${a.id}/hidden`, { method: "PUT", body: JSON.stringify({ hidden: true }) });
-        toast(`"${a.name}" ya no aparece en la tabla (su acceso no cambia).`);
-        openAgenciasView();
-      } catch (err) {
-        toast(err.message, true);
-        hideBtn.disabled = false;
-      }
-    });
+    // El botón "Ocultar" se quitó a petición de Aitor: como dueño del CRM
+    // esta tabla debe mostrar SIEMPRE todas las agencias dadas de alta, sin
+    // posibilidad de que una quede escondida sin querer (ver GET
+    // /api/agencies en agencies.ts, que ya no filtra por "hidden").
     tbody.appendChild(el("tr", {}, [
       el("td", {}, a.name),
       el("td", {}, a.ownerEmail),
       el("td", {}, String(a.accountsCount)),
       el("td", {}, String(a.workersCount)),
       el("td", {}, el("span", { class: "pill " + (a.active ? "ok" : "off") }, a.active ? "Activa" : "Suspendida")),
-      el("td", {}, [viewAsBtn, hideBtn, suspendBtn, resetBtn, deleteBtn]),
+      el("td", {}, [viewAsBtn, suspendBtn, resetBtn, deleteBtn]),
     ]));
   }
   table.appendChild(tbody);
@@ -753,8 +1102,21 @@ function renderAgenciasShell(agencies) {
 
 function statusDotClass(acc) {
   if (!acc.reenviadorEnabled) return "off";
+  // connectionStatus viene del proceso en vivo (ver getAccountConnectionStatus
+  // en el backend), no de un campo cacheado en BD: si la sesion de Telegram
+  // esta de verdad caida ahora mismo, se pinta en rojo aunque el reenviador
+  // este encendido y no haya ningun flood - antes esto se quedaba siempre en
+  // verde aunque la cuenta llevara horas sin poder hablar con Telegram.
+  if (acc.connectionStatus === "disconnected") return "paused";
   if (acc.health === "PEER_FLOOD_PAUSED") return "paused";
   return "on";
+}
+
+function statusDotTitle(acc) {
+  if (!acc.reenviadorEnabled) return "Reenviador apagado";
+  if (acc.connectionStatus === "disconnected") return "Desconectada de Telegram ahora mismo";
+  if (acc.health === "PEER_FLOOD_PAUSED") return "Pausada por límite de Telegram (flood)";
+  return "Conectada";
 }
 
 function renderAccountList() {
@@ -773,7 +1135,7 @@ function renderAccountList() {
       }, [
         accountAvatarEl(acc.id, acc.label),
         el("div", { class: "account-name" }, acc.label),
-        inMensajes ? badge : el("div", { class: "status-dot " + statusDotClass(acc) }),
+        inMensajes ? badge : el("div", { class: "status-dot " + statusDotClass(acc), title: statusDotTitle(acc) }),
       ])
     );
     if (inMensajes) {
@@ -2635,8 +2997,51 @@ function openEditCampaignModal(c) {
     const destBulkRow = el("div", { style: "margin-bottom:6px" });
     const destMarkAll = el("button", { type: "button", class: "sm" }, "Marcar todos");
     const destMarkNone = el("button", { type: "button", class: "sm" }, "Marcar ninguno");
+    // "Volver a detectar": vuelve a leer la carpeta de Telegram y añade los
+    // chats que falten (sin tocar ni duplicar los que ya están) - para
+    // cuando al crear la campaña se quedaron destinos sin detectar porque
+    // Telegram todavía no los tenía en caché (típico justo tras reiniciar
+    // el servidor), ver el aviso al crear la campaña en openModal de arriba.
+    const destRedetect = el("button", { type: "button", class: "sm" }, "Volver a detectar destinos de la carpeta");
+    destRedetect.addEventListener("click", async () => {
+      destRedetect.disabled = true;
+      const originalLabel = destRedetect.textContent;
+      destRedetect.textContent = "Buscando en la carpeta...";
+      try {
+        const res = await api(`/accounts/${c.accountId}/telegram-folders/${encodeURIComponent(c.folderName)}/chats?force=1`);
+        const resolved = res.chats.filter((ch) => ch.title !== "(no se pudo resolver)");
+        const already = new Set(c.destinationChats.map((d) => d.chatId));
+        const missing = resolved.filter((ch) => !already.has(ch.chatId));
+        let added = 0;
+        for (const chat of missing) {
+          try {
+            await api(`/campaigns/${c.id}/destinations`, {
+              method: "POST",
+              body: JSON.stringify({ chatId: chat.chatId, chatTitle: chat.title, topicId: null }),
+            });
+            added++;
+          } catch { /* duplicado u otro fallo puntual: sigue con el resto */ }
+        }
+        const unresolvedCount = res.unresolvedCount || 0;
+        if (added > 0) {
+          toast(`${added} destino(s) nuevo(s) añadido(s)` + (unresolvedCount > 0 ? ` - ${unresolvedCount} todavía sin detectar, prueba otra vez en un rato` : ""));
+          close();
+          renderAccountView(state.currentAccountId);
+        } else if (unresolvedCount > 0) {
+          toast(`No se añadió ninguno nuevo - ${unresolvedCount} chat(s) de la carpeta siguen sin poder leerse desde Telegram, prueba otra vez en un rato`, true);
+        } else {
+          toast("Ya estaban todos los destinos de la carpeta añadidos");
+        }
+      } catch (err) {
+        toast(err.message, true);
+      } finally {
+        destRedetect.disabled = false;
+        destRedetect.textContent = originalLabel;
+      }
+    });
     destBulkRow.appendChild(destMarkAll);
     destBulkRow.appendChild(destMarkNone);
+    destBulkRow.appendChild(destRedetect);
     modal.appendChild(destBulkRow);
     const destCheckboxes = [];
     const destList = el("div", {});
@@ -2834,9 +3239,11 @@ async function openAddCampaignModal(accountId, sourceGroups) {
 
             toast("Campaña creada, cargando destinos de la carpeta...");
             let chats = [];
+            let unresolvedCount = 0;
             try {
               const res = await api(`/accounts/${folderAccountId}/telegram-folders/${encodeURIComponent(folderTitle)}/chats`);
               chats = res.chats.filter((ch) => ch.title !== "(no se pudo resolver)");
+              unresolvedCount = res.unresolvedCount || 0;
             } catch (err) {
               toast("No se pudieron leer los chats de la carpeta automáticamente: " + err.message, true);
             }
@@ -2856,7 +3263,14 @@ async function openAddCampaignModal(accountId, sourceGroups) {
             }
 
             close();
-            toast(`Campaña "${folderTitle}" creada con ${chats.length} destino(s)`);
+            if (unresolvedCount > 0) {
+              toast(
+                `Campaña "${folderTitle}" creada con ${chats.length} destino(s) - ${unresolvedCount} no se pudieron detectar todavía (Telegram aún no los tiene en caché, pasa más justo tras reiniciar el servidor). Abre "Editar" en esta campaña en un minuto y pulsa "Volver a detectar destinos de la carpeta" para añadirlos.`,
+                true
+              );
+            } else {
+              toast(`Campaña "${folderTitle}" creada con ${chats.length} destino(s)`);
+            }
 
             if (activateNow.checked) {
               const { account } = await api(`/accounts/${accountId}`);
@@ -3413,6 +3827,33 @@ async function renderConsole(accountId, campaigns) {
 // reconstrucciones (se pierde solo al recargar la página del todo).
 let chatTabsByAccount = new Map();
 
+// Cache en memoria del navegador (se pierde solo al recargar la pagina del
+// todo) para que volver a un chat o a una creadora ya vistos en esta misma
+// sesion se pinte AL INSTANTE con lo ultimo que se sabia de ellos, mientras
+// se pide en segundo plano lo mas reciente - en vez de vaciar el panel y
+// mostrar "Cargando..." cada vez, que es como se sentia mas lento que el
+// propio Telegram al saltar entre chats/creadoras o entre varias pestañas
+// de chat abiertas a la vez. chatMessagesCache: clave "accountId:chatId" ->
+// {messages, hasMore, signature}. dialogsCacheByAccount: clave
+// "accountId:normal"|"accountId:sfs" -> {dialogsRaw, fanLists}.
+const chatMessagesCache = new Map();
+const dialogsCacheByAccount = new Map();
+// Mismo porque, para la bandeja agregada "Mensajes Pro > Todas": antes
+// SIEMPRE arrancaba en blanco con "Cargando..." y pedía las ~N cuentas
+// enteras de cero cada vez que se entraba a esa pestaña, aunque se acabara
+// de ver hace un minuto - así es como se notaba que "Todas" se recargaba
+// de cero al salir y volver a entrar. allRows es solo un array (no un Map
+// por cuenta) porque esta vista ya mezcla TODAS las cuentas en una sola
+// lista ordenada por fecha.
+let proAllRowsCache = null;
+function cacheSetCapped(map, key, value, maxSize) {
+  map.set(key, value);
+  if (map.size > maxSize) {
+    const oldestKey = map.keys().next().value;
+    if (oldestKey !== undefined) map.delete(oldestKey);
+  }
+}
+
 let mensajesState = {
   accountId: null,
   dialogs: [],
@@ -3435,6 +3876,8 @@ let mensajesState = {
   filterMode: "all", // "all" | "unread" | "priority"
   filterList: "", // valor de FAN_LISTS_FOR_FILTER, o "" (sin filtrar por lista)
   folders: null, // carpetas reales de Telegram de esta cuenta (cache, se piden una vez)
+  folderSyncMap: null, // {"Posibles": "<nombre real en Telegram>", ...} (cache, se pide una vez)
+  folderSyncMapFor: "", // accountId al que corresponde folderSyncMap actualmente
   folderChats: [], // chats de la carpeta real de Telegram que coincide con filterList
   folderChatsFor: "", // que valor de filterList corresponde a folderChats actualmente
   chatTabs: [], // {chatId, title}: chats de cliente abiertos a la vez dentro de esta creadora (como TeleCrew)
@@ -3503,10 +3946,20 @@ async function renderMensajesView(accountId, container = appEl, opts = {}) {
   // que tienen que arrancar cerradas -si no, tapan la lista/el chat desde el
   // primer momento-: el mismo botón 📝 de siempre las abre y las cierra.
   const notesPane = el("div", { class: "notes-pane" + (window.innerWidth <= 860 ? " notes-pane-hidden" : "") });
+  const dialogsResizer = el("div", { class: "resize-handle", title: "Arrastra para cambiar el ancho" });
+  const notesResizer = el("div", { class: "resize-handle", title: "Arrastra para cambiar el ancho" });
   layout.appendChild(dialogsPane);
+  layout.appendChild(dialogsResizer);
   layout.appendChild(chatPane);
+  layout.appendChild(notesResizer);
   layout.appendChild(notesPane);
   container.appendChild(layout);
+  // Cada persona puede dejar más ancha la lista de chats o el panel de
+  // notas, a su gusto - el ancho elegido se guarda en SU navegador (no es
+  // algo de la cuenta ni se comparte con el resto del equipo), ver
+  // initPanelResizer más abajo.
+  initPanelResizer(dialogsResizer, "--dialogspane-w", "luxe_panel_w_dialogs", { min: 220, max: 520, default: 300 });
+  initPanelResizer(notesResizer, "--notespane-w", "luxe_panel_w_notes", { min: 220, max: 520, default: 300 });
 
   mensajesState.layoutEl = layout;
   mensajesState.dialogsPane = dialogsPane;
@@ -3678,7 +4131,25 @@ async function renderMensajesView(accountId, container = appEl, opts = {}) {
   mensajesState.dialogsListEl = dialogsListEl;
 
   renderNotesPanel(notesPane, accountId, null, null);
-  await Promise.all([loadDialogs(accountId), loadRecentBuyers(accountId)]);
+  // Si ya habiamos visto esta creadora en esta misma sesion de navegador
+  // (ver dialogsCacheByAccount), se pinta YA la ultima lista conocida -sin
+  // esperar al servidor- y loadDialogs() de abajo sigue pidiendo lo mas
+  // reciente igualmente para refrescarla; como loadDialogs ya mira si la
+  // lista tiene contenido antes de mostrar "Cargando...", no vuelve a
+  // vaciarla mientras tanto. Antes, cambiar de creadora SIEMPRE empezaba
+  // desde una lista vacia aunque llevaras un minuto viendo esa misma cuenta.
+  const cachedDialogs = dialogsCacheByAccount.get(`${accountId}:${mensajesState.sfsMode ? "sfs" : "normal"}`);
+  if (cachedDialogs) {
+    mensajesState.dialogsRaw = cachedDialogs.dialogsRaw;
+    mensajesState.fanLists = cachedDialogs.fanLists;
+    applyDialogFilters();
+  }
+  // Antes: se esperaba a que terminara la carga de la lista de chats ANTES de
+  // abrir el stream en vivo y de restaurar las pestañas de chat abiertas, así
+  // que al cambiar de creadora la conversación que tenías abierta salía vacía
+  // (o desaparecía) hasta que Telegram contestaba y luego "volvía" sola. Ahora
+  // todo arranca a la vez: la lista, el stream en vivo y el chat restaurado.
+  const dialogsLoadPromise = Promise.all([loadDialogs(accountId), loadRecentBuyers(accountId)]);
   connectMensajesLiveStream(accountId);
 
   // Red de seguridad: ademas del botón 🔄 y de los eventos en vivo (SSE), la
@@ -3693,14 +4164,16 @@ async function renderMensajesView(accountId, container = appEl, opts = {}) {
   // Si esta creadora ya tenía pestañas de chat abiertas de antes (p.ej.
   // volviste de ver a otra modelo en Mensajes Pro), se restauran tal cual
   // se dejaron, con el mismo chat activo.
+  let restoreTabsPromise = Promise.resolve();
   const storedTabs = chatTabsByAccount.get(accountId);
   if (storedTabs && storedTabs.chatTabs.length > 0) {
     mensajesState.chatTabs = storedTabs.chatTabs.map((t) => ({ ...t }));
     renderChatTabsBar();
     if (storedTabs.activeChatTabKey) {
-      await activateChatTab(storedTabs.activeChatTabKey);
+      restoreTabsPromise = activateChatTab(storedTabs.activeChatTabKey);
     }
   }
+  await Promise.all([dialogsLoadPromise, restoreTabsPromise]);
 }
 
 /** Guarda (en chatTabsByAccount) qué pestañas de chat hay abiertas ahora
@@ -3749,14 +4222,48 @@ async function ensureAccountFoldersLoaded(accountId) {
   return mensajesState.folders;
 }
 
+/** El mapa de Configuración → "Carpetas de Telegram" (Posibles/Clientes/
+ * Grupo cliente/SFS/TW -> nombre real que tiene esa carpeta en Telegram de
+ * ESTA cuenta, que puede ser cualquier cosa). Se pide una vez por cuenta. */
+async function ensureAccountFolderSyncMapLoaded(accountId) {
+  if (mensajesState.folderSyncMap && mensajesState.folderSyncMapFor === accountId) return mensajesState.folderSyncMap;
+  try {
+    const res = await api(`/accounts/${accountId}/folder-sync`);
+    mensajesState.folderSyncMap = res.map || {};
+  } catch {
+    mensajesState.folderSyncMap = {};
+  }
+  mensajesState.folderSyncMapFor = accountId;
+  return mensajesState.folderSyncMap;
+}
+
+/** Nombre real de la carpeta de Telegram que corresponde a una "lista"
+ * (Posibles/Clientes/Grupo cliente/SFS/TW). Antes esto SOLO adivinaba por
+ * parecido de palabras entre el valor de la lista y los nombres de las
+ * carpetas reales (findMatchingFolderTitle) - si la cuenta tenia esa
+ * carpeta renombrada en Telegram a algo sin ninguna palabra en comun (p.ej.
+ * "Posibles" renombrada a "VIP"), no encontraba nada y la pestaña del
+ * filtro se quedaba vacia aunque la carpeta existiera y tuviera chats, que
+ * es justo el bug reportado ("Posibles" sin resultados). Ahora se mira
+ * PRIMERO el nombre que la propia cuenta tiene configurado en
+ * Configuración → Carpetas de Telegram (el mismo que ya usa el backend
+ * para esto, ver folderSyncMap en messages.ts) y solo si no hay nada
+ * configurado ahi se cae al adivinado por parecido, para cuentas antiguas
+ * que nunca llegaron a configurarlo. */
+async function resolveFolderTitleForList(accountId, listValue) {
+  const syncMap = await ensureAccountFolderSyncMapLoaded(accountId);
+  if (syncMap && syncMap[listValue]) return syncMap[listValue];
+  const folders = await ensureAccountFoldersLoaded(accountId);
+  return findMatchingFolderTitle(folders, listValue);
+}
+
 /** Al elegir una lista en "Todas las listas", ademas de filtrar por la
  * etiqueta del CRM, trae los chats de la carpeta real de Telegram con ese
  * mismo nombre (p.ej. "Clientes" o "Grupo cliente" -> los grupos
  * restringidos), para poder verlos aunque todavia no tengan nota puesta. */
 async function loadFolderChatsForFilter(accountId, listValue) {
   if (!listValue) { mensajesState.folderChats = []; mensajesState.folderChatsFor = ""; return; }
-  const folders = await ensureAccountFoldersLoaded(accountId);
-  const folderTitle = findMatchingFolderTitle(folders, listValue);
+  const folderTitle = await resolveFolderTitleForList(accountId, listValue);
   if (!folderTitle) { mensajesState.folderChats = []; mensajesState.folderChatsFor = listValue; return; }
   try {
     const { chats: chatsRaw } = await api(`/accounts/${accountId}/telegram-folders/${encodeURIComponent(folderTitle)}/chats`);
@@ -3992,14 +4499,20 @@ function connectMensajesLiveStream(accountId) {
     if (!ev.data) return;
     let payload;
     try { payload = JSON.parse(ev.data); } catch { return; }
-    if (payload.type !== "message") return;
+    if (payload.type !== "message" && payload.type !== "read") return;
     if (mensajesState.accountId !== accountId) return; // el usuario ya cambio de vista/cuenta
 
     setLiveStatus(true);
 
+    // "read": el fan ha leído (al menos) hasta cierto punto de este chat -
+    // si lo tenemos abierto, se vuelve a pedir la conversación para que los
+    // ✓ pasen a ✓✓ al instante (el backend ya calcula "read" por mensaje,
+    // ver GET .../messages). No lleva mas datos que el chatId, así que no
+    // hay nada mas que hacer para este tipo de evento.
     if (payload.chatId === mensajesState.currentChatId && mensajesState.chatPane) {
       renderChat(accountId, payload.chatId, mensajesState.currentChatTitle, mensajesState.chatPane, true);
     }
+    if (payload.type === "read") return;
 
     if (!payload.message.out) maybeNotifyNewMessage(accountId, payload.chatId, payload.message.text);
 
@@ -4028,6 +4541,12 @@ function connectMensajesLiveStream(accountId) {
  * nuevo (ver Configuración → General → "Notificaciones"). Solo si el
  * navegador lo tiene permitido y la pestaña no esta al frente. */
 function maybeNotifyNewMessage(accountId, chatId, text) {
+  // Los avisos de mensajes nuevos los da ahora notifyIncomingMessage (más
+  // abajo), alimentado por un único stream de TODAS las cuentas - así avisa
+  // aunque no estés dentro de la cuenta (ni en Mensajes). Esta función queda
+  // vacía a propósito para no duplicar el aviso.
+  return;
+  // eslint-disable-next-line no-unreachable
   try {
     const local = getLocalSettings();
     if (!local.notifications) return;
@@ -4041,6 +4560,219 @@ function maybeNotifyNewMessage(accountId, chatId, text) {
   } catch {
     // si el navegador bloquea las notificaciones, simplemente no se muestra
   }
+}
+
+/** Lo mismo que maybeNotifyNewMessage, pero para Mensajes Pro con varias
+ * creadoras a la vez (ver /api/accounts/live-stream en el backend): aquí
+ * solo cubrimos las cuentas que NO son la pestaña activa ahora mismo - si
+ * lo es, ya la cubre connectMensajesLiveStream + maybeNotifyNewMessage de
+ * esa pestaña (con su propio criterio de "¿se está viendo ya ese chat
+ * exacto?"), y no conviene duplicar el aviso. Así, con 2, 4, 5 o 6 modelos
+ * abiertas, salta la notificación de escritorio aunque el mensaje nuevo sea
+ * de una creadora que no tienes delante en este momento - igual que
+ * Telegram Desktop. */
+function maybeNotifyProNewMessage(accountLabel, chatTitle, accountId, chatId, text, messageId) {
+  notifyIncomingMessage({ accountId, accountLabel, chatId, chatTitle, text, messageId });
+}
+
+// ---------- Avisos de mensajes nuevos (todas las cuentas, cualquier sección)
+// Antes solo avisaba la cuenta abierta (o, en Mensajes Pro, las pestañas), y
+// los navegadores nunca llegaban a pedir permiso a los trabajadores (el
+// interruptor está en Configuración, que ellos no ven) - así que los avisos
+// "no salían" salvo estando dentro de la cuenta, y desaparecían solos al
+// cabo de unos segundos. Ahora: un único stream de todas las cuentas
+// permitidas, aviso de escritorio que se queda hasta que lo cierras, aviso
+// dentro del panel, contador en el título de la pestaña y un pitido suave.
+const notifyState = { es: null, seen: new Set(), unread: 0, baseTitle: null, lastSound: 0, banner: null };
+
+function notifyUpdateTitle() {
+  if (notifyState.baseTitle === null) notifyState.baseTitle = document.title.replace(/^\(\d+\)\s*/, "");
+  document.title = notifyState.unread > 0 ? `(${notifyState.unread}) ${notifyState.baseTitle}` : notifyState.baseTitle;
+}
+
+function notifyBeep() {
+  try {
+    const now = Date.now();
+    if (now - notifyState.lastSound < 1500) return;
+    notifyState.lastSound = now;
+    if (getLocalSettings().sound === false) return;
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return;
+    const ctx = notifyState.audioCtx || (notifyState.audioCtx = new Ctx());
+    if (ctx.state === "suspended") ctx.resume().catch(() => {});
+    // Campanita suave de dos notas (sol -> do agudo), con un armonico para que
+    // suene a campana y no a "pitido".
+    const t0 = ctx.currentTime;
+    const note = (freq, start, dur, vol) => {
+      for (const [mult, v] of [[1, vol], [2, vol * 0.25]]) {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = "sine";
+        osc.frequency.value = freq * mult;
+        gain.gain.setValueAtTime(0.0001, t0 + start);
+        gain.gain.exponentialRampToValueAtTime(v, t0 + start + 0.012);
+        gain.gain.exponentialRampToValueAtTime(0.0001, t0 + start + dur);
+        osc.connect(gain).connect(ctx.destination);
+        osc.start(t0 + start);
+        osc.stop(t0 + start + dur + 0.05);
+      }
+    };
+    note(784, 0, 0.45, 0.10);    // sol5
+    note(1047, 0.13, 0.7, 0.10); // do6
+  } catch {
+    // sin audio disponible: no pasa nada
+  }
+}
+
+function notifyIncomingMessage({ accountId, accountLabel, chatId, chatTitle, text, messageId }) {
+  try {
+    const key = `${accountId}:${chatId}:${messageId ?? text}`;
+    if (notifyState.seen.has(key)) return;
+    notifyState.seen.add(key);
+    if (notifyState.seen.size > 500) notifyState.seen = new Set([...notifyState.seen].slice(-250));
+
+    const viewingThisChat =
+      document.visibilityState === "visible" &&
+      document.hasFocus() &&
+      mensajesState.accountId === accountId &&
+      mensajesState.currentChatId === chatId;
+    if (viewingThisChat) return;
+
+    const local = getLocalSettings();
+    if (local.notifications === false) return;
+
+    const account = (state.accounts || []).find((a) => a.id === accountId);
+    const label = accountLabel || (account && account.label) || "Mensaje nuevo";
+    const dialog = (mensajesState.dialogs || []).find((d) => d.chatId === chatId);
+    const fan = chatTitle || (dialog && dialog.title) || "";
+    const title = label + (fan ? " · " + fan : "");
+    const body = text || "[archivo adjunto]";
+
+    // Contador en el título mientras la pestaña no está a la vista
+    if (document.visibilityState !== "visible" || !document.hasFocus()) {
+      notifyState.unread += 1;
+      notifyUpdateTitle();
+    }
+    notifyBeep();
+
+    if (typeof Notification !== "undefined" && Notification.permission === "granted") {
+      const n = new Notification(title, {
+        body,
+        tag: `${accountId}:${chatId}`, // un mismo chat sustituye su aviso anterior en vez de apilarlos
+        renotify: true,
+        requireInteraction: true, // se queda hasta que lo cierres (antes desaparecía solo)
+      });
+      n.onclick = () => {
+        try { window.focus(); } catch { /* ignorar */ }
+        n.close();
+        if (!window.location.pathname.startsWith("/mensajes-pro")) {
+          goToChatFromDashboard(accountId, chatId, fan).catch(() => {});
+        }
+      };
+    } else {
+      notifyShowPermissionBanner();
+    }
+    if (document.visibilityState === "visible") toast(`💬 ${title}: ${body.slice(0, 80)}`);
+  } catch {
+    // los avisos nunca deben romper la app
+  }
+}
+
+function notifyShowPermissionBanner() {
+  if (notifyState.banner || typeof Notification === "undefined" || Notification.permission !== "default") return;
+  const banner = el("div", { class: "notify-permission-banner" }, [
+    el("span", {}, "🔔 Activa los avisos para enterarte de los mensajes nuevos aunque estés en otra cuenta o ventana."),
+    el("button", {
+      type: "button",
+      class: "sm",
+      onclick: async () => {
+        try { await Notification.requestPermission(); } catch { /* ignorar */ }
+        banner.remove();
+        notifyState.banner = null;
+      },
+    }, "Activar avisos"),
+    el("button", {
+      type: "button",
+      class: "sm ghost",
+      onclick: () => { banner.remove(); notifyState.banner = null; },
+    }, "Ahora no"),
+  ]);
+  document.body.appendChild(banner);
+  notifyState.banner = banner;
+}
+
+function startGlobalMessageNotifications() {
+  if (notifyState.es) return;
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") { notifyState.unread = 0; notifyUpdateTitle(); }
+  });
+  window.addEventListener("focus", () => { notifyState.unread = 0; notifyUpdateTitle(); });
+  if (typeof Notification !== "undefined" && Notification.permission === "default" && getLocalSettings().notifications !== false) {
+    setTimeout(notifyShowPermissionBanner, 4000);
+  }
+  prefetchAllDialogs();
+  const es = new EventSource(`${API_BASE}/accounts/live-stream`);
+  notifyState.es = es;
+  es.onmessage = (ev) => {
+    let payload;
+    try { payload = JSON.parse(ev.data); } catch { return; }
+    if (payload.type !== "message" || !payload.message || payload.message.out) return;
+    if (payload.notify === false) return; // canales, grupos de +2 o silenciados
+    const acc = (state.accounts || []).find((a) => a.id === payload.accountId);
+    notifyIncomingMessage({
+      accountId: payload.accountId,
+      accountLabel: payload.accountLabel || (acc ? acc.label : ""),
+      chatId: payload.chatId,
+      chatTitle: payload.chatTitle,
+      text: payload.message.text,
+      messageId: payload.message.id,
+    });
+  };
+}
+
+/** Precarga en segundo plano la lista de chats de cada creadora (de una en
+ * una, con pausa) para que el primer cambio a cada cuenta ya salga pintado
+ * al instante desde dialogsCacheByAccount. */
+let dialogsPrefetchStarted = false;
+function prefetchAllDialogs() {
+  if (dialogsPrefetchStarted) return;
+  dialogsPrefetchStarted = true;
+  setTimeout(async () => {
+    const accs = (state.accounts || []).slice();
+    for (const a of accs) {
+      const key = `${a.id}:normal`;
+      if (dialogsCacheByAccount.has(key)) continue;
+      try {
+        const [{ dialogs }, listsRes] = await Promise.all([
+          api(`/accounts/${a.id}/dialogs`),
+          api(`/accounts/${a.id}/fan-notes-lists`).catch(() => ({ lists: {} })),
+        ]);
+        if (!dialogsCacheByAccount.has(key)) {
+          cacheSetCapped(dialogsCacheByAccount, key, { dialogsRaw: dialogs, fanLists: listsRes.lists || {} }, 20);
+        }
+      } catch {}
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+  }, 6000);
+}
+
+/** Tras enviar un mensaje, la fila de ese chat en la lista pasa YA a mostrar
+ * "Tú: <ese mensaje>" y sube arriba, sin esperar al refresco del servidor. */
+function bumpDialogAfterSend(accountId, chatId, text) {
+  try {
+    const raw = mensajesState.dialogsRaw;
+    if (mensajesState.accountId !== accountId || !raw) return;
+    const idx = raw.findIndex((d) => d.chatId === chatId);
+    if (idx < 0) return;
+    const d = raw[idx];
+    d.lastMessage = text;
+    d.lastMessageOut = true;
+    d.lastMessageDate = new Date().toISOString();
+    d.unreadCount = 0;
+    raw.splice(idx, 1);
+    raw.unshift(d);
+    applyDialogFilters();
+  } catch {}
 }
 
 function setLiveStatus(live) {
@@ -4121,8 +4853,26 @@ async function loadDialogs(accountId, opts = {}) {
       api(`/accounts/${accountId}/fan-notes-lists`).catch(() => ({ lists: {} })),
     ]);
     if (isStale()) return; // una peticion mas nueva (o un cambio de cuenta) ya tomo el relevo
+    // El chat que se tiene abierto ahora mismo SIEMPRE se pinta como leido en
+    // esta lista, pase lo que pase con lo que diga el servidor: markDialogRead
+    // (al pedir sus mensajes) es "best-effort" y en el hueco entre que se abre
+    // el chat y que esa escritura termina, un refresco de la lista como este
+    // (en vivo, cada 3 min, o al recargar) podia pillar todavia el numero
+    // viejo y "revivir" la burbuja de no-leido en un chat que se esta viendo
+    // en este mismo instante - el chat activo no necesita preguntarle nada a
+    // nadie para saber que esta leido.
+    if (myState.currentChatId) {
+      for (const d of dialogs) {
+        if (d.chatId === myState.currentChatId) d.unreadCount = 0;
+      }
+    }
     myState.dialogsRaw = dialogs;
     myState.fanLists = listsRes.lists || {};
+    // Cache por creadora (ver chatMessagesCache/dialogsCacheByAccount mas
+    // arriba): la proxima vez que se vuelva a esta cuenta en la misma
+    // sesion, renderMensajesView puede pintar esta lista al instante en vez
+    // de vaciar el panel y esperar otra vez al servidor.
+    cacheSetCapped(dialogsCacheByAccount, `${accountId}:${myState.sfsMode ? "sfs" : "normal"}`, { dialogsRaw: dialogs, fanLists: myState.fanLists }, 20);
     if (myState.debugBannerEl) {
       if (debug) {
         renderDialogsDebugBanner(myState.debugBannerEl, accountId, debug);
@@ -4301,14 +5051,27 @@ async function activateChatTab(chatId, titleMaybe) {
   if (mensajesState.dialogsListEl) {
     [...mensajesState.dialogsListEl.querySelectorAll(".dialog-item")].forEach((el2) => el2.classList.remove("active"));
   }
-  // Marca este item como activo y su contador como leido al instante (sin esperar al servidor).
+  // Marca este item como activo y su contador como leido al instante (sin
+  // esperar al servidor). Antes esto solo borraba el nodo del DOM: el
+  // objeto en memoria (mensajesState.dialogs/dialogsRaw) se quedaba con el
+  // numero viejo, así que cualquier repintado posterior desde ese mismo
+  // estado (antes de que el servidor confirmase el 0, o en cualquier
+  // repintado que no vuelva a pedir la lista) podía devolver la burbuja. Se
+  // pone a 0 también en el objeto, en los dos sitios donde puede vivir
+  // (dialogs es casi siempre el mismo objeto que dialogsRaw, pero por si el
+  // filtrado alguna vez clona, se tocan los dos por seguridad).
   const items = mensajesState.dialogsListEl ? [...mensajesState.dialogsListEl.querySelectorAll(".dialog-item")] : [];
   const idx = mensajesState.dialogs.findIndex((d) => d.chatId === chatId);
-  if (idx >= 0 && items[idx]) {
-    items[idx].classList.add("active");
-    const unread = items[idx].querySelector(".dialog-unread");
-    if (unread) unread.remove();
+  if (idx >= 0) {
+    mensajesState.dialogs[idx].unreadCount = 0;
+    if (items[idx]) {
+      items[idx].classList.add("active");
+      const unread = items[idx].querySelector(".dialog-unread");
+      if (unread) unread.remove();
+    }
   }
+  const rawDialog = (mensajesState.dialogsRaw || []).find((d) => d.chatId === chatId);
+  if (rawDialog) rawDialog.unreadCount = 0;
 
   renderNotesPanel(mensajesState.notesPane, accountId, chatId, title);
   await renderChat(accountId, chatId, title, mensajesState.chatPane);
@@ -4468,16 +5231,57 @@ function formatLastSeenSubtitle(res) {
   return "última conexión desconocida";
 }
 
+/** Pide el nombre nuevo (como en TeleCrew: lápiz ✏️ junto al nombre del
+ * fan) y lo guarda - el propio backend cambia el nombre TAMBIÉN en
+ * Telegram (el contacto guardado por esta cuenta), no solo aquí en el CRM.
+ * A propósito solo deja tocar el nombre (nada de teléfono/usuario/etc.). */
+function editFanNameBtn(accountId, chatId, nameEl, currentTitleGetter) {
+  const btn = el("button", { type: "button", class: "composer-icon-btn chat-header-edit-name-btn", title: "Editar nombre del fan" }, "✏️");
+  btn.addEventListener("click", async (ev) => {
+    ev.stopPropagation();
+    const current = currentTitleGetter();
+    const nuevo = prompt("Nuevo nombre del cliente:", current);
+    if (!nuevo || !nuevo.trim() || nuevo.trim() === current) return;
+    btn.disabled = true;
+    try {
+      const res = await api(`/accounts/${accountId}/dialogs/${chatId}/fan-name`, {
+        method: "POST",
+        body: JSON.stringify({ name: nuevo.trim() }),
+      });
+      nameEl.textContent = res.title;
+      // La lista de Mensajes (barra lateral) también usa este nombre - se
+      // refresca en silencio para que se vea el cambio sin esperar al
+      // siguiente refresco automático. (Vale tanto para Mensajes como para
+      // Mensajes Pro: ambos comparten loadDialogs/mensajesState.)
+      loadDialogs(accountId, { silent: true }).catch(() => {});
+      toast("Nombre actualizado (también en Telegram)");
+    } catch (err) {
+      toast(err.message, true);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+  return btn;
+}
+
 /** Bloque "nombre + última conexión" de la cabecera del chat, igual que
  * Telegram lo muestra bajo el nombre del contacto. */
 function buildChatHeaderNameBlock(accountId, chatId, title) {
   const subtitle = el("div", { class: "chat-header-subtitle" }, "");
+  const nameEl = el("div", { style: "font-weight:600" }, title);
+  const nameRow = el("div", { style: "display:flex;align-items:center;gap:6px;min-width:0" }, [
+    el("span", { style: "overflow:hidden;text-overflow:ellipsis;white-space:nowrap" }, nameEl),
+  ]);
   const block = el(
     "div",
     { style: "flex:1;min-width:0;cursor:pointer", title: "Ver grupos en común con este cliente" },
-    [el("div", { style: "font-weight:600" }, title), subtitle]
+    [nameRow, subtitle]
   );
-  block.addEventListener("click", () => openCommonGroupsModal(accountId, chatId, title));
+  // El lápiz de editar nombre NO debe abrir el modal de "grupos en común"
+  // (tiene su propio click, con stopPropagation), así que se añade fuera
+  // del listener de click del bloque entero.
+  nameRow.appendChild(editFanNameBtn(accountId, chatId, nameEl, () => nameEl.textContent));
+  block.addEventListener("click", () => openCommonGroupsModal(accountId, chatId, nameEl.textContent));
   api(`/accounts/${accountId}/dialogs/${chatId}/profile`)
     .then((res) => {
       // El pais sale siempre que se pueda deducir (aunque el fan tenga el
@@ -4494,49 +5298,95 @@ function buildChatHeaderNameBlock(accountId, chatId, title) {
 }
 
 /** Al tocar el nombre/última conexión del cliente en la cabecera del chat:
- * lista los grupos que la cuenta y ese cliente tienen en común (igual que
- * Telegram al tocar el nombre de un contacto), y deja entrar a cualquiera
- * de ellos con un clic. */
+ * si este cliente YA tiene su grupo restringido creado (el único donde
+ * SOLO están la modelo y él, sin nadie más) vamos directos ahí - es lo que
+ * de verdad se busca al tocar el nombre, igual que el botón 👥 de al lado.
+ * Antes esto siempre abría la lista de "grupos en común" sin más (la misma
+ * que Telegram muestra al tocar el nombre de un contacto), y como esa lista
+ * no distingue cuál de esos grupos es el restringido, elegir cualquiera de
+ * ahí podía llevar a un grupo compartido por casualidad con 3, 50 o 100
+ * personas en vez de al grupo de solo los dos - el bug que se reportó como
+ * "me lleva a un grupo al azar". Esa lista ahora solo se muestra cuando el
+ * grupo restringido todavía no existe (para poder adoptar uno ya creado a
+ * mano, o simplemente mirar qué más se comparte con el cliente). */
 function openCommonGroupsModal(accountId, chatId, title) {
   openModal((modal, close) => {
-    modal.appendChild(el("h3", {}, `Grupos en común con ${title}`));
+    modal.appendChild(el("h3", {}, `Grupo con ${title}`));
     const body = el("div", {}, el("div", { class: "empty" }, "Cargando..."));
     modal.appendChild(body);
-    api(`/accounts/${accountId}/dialogs/${chatId}/common-groups`)
+    api(`/accounts/${accountId}/dialogs/${chatId}/restricted-group`)
       .then((res) => {
-        body.innerHTML = "";
-        const groups = res.groups || [];
-        if (!groups.length) {
-          body.appendChild(el("div", { class: "empty" }, "No hay grupos en común con este cliente."));
+        if (res.exists && res.groupChatId) {
+          close();
+          openChat(accountId, { chatId: res.groupChatId, title: res.groupTitle || `Grupo con ${title}` });
           return;
         }
-        const list = el("div", { class: "common-groups-list" });
-        groups.forEach((g) => {
-          const row = el(
-            "button",
-            { type: "button", class: "common-group-row" },
-            g.title || "(sin nombre)"
-          );
-          row.addEventListener("click", () => {
-            close();
-            openChat(accountId, { chatId: g.chatId, title: g.title || `Grupo con ${title}` });
-          });
-          list.appendChild(row);
-        });
-        body.appendChild(list);
+        loadCommonGroupsIntoModal(accountId, chatId, title, body, close);
       })
-      .catch((err) => {
-        body.innerHTML = "";
-        body.appendChild(el("div", { class: "empty" }, err.message || "No se pudieron cargar los grupos en común."));
-      });
+      .catch(() => loadCommonGroupsIntoModal(accountId, chatId, title, body, close));
   });
 }
 
-/** Cuando Telegram no deja añadir al cliente directamente (privacidad),
- * copiamos el enlace de invitación al portapapeles para que sea fácil
- * pegárselo por privado y que entre él mismo con un toque. */
-function copyInviteLinkAndToast(inviteLink, message) {
-  if (inviteLink && navigator.clipboard?.writeText) {
+/** Lista de "grupos en común" sin más (cualquier tamaño) - solo se enseña
+ * cuando el cliente todavía no tiene su grupo restringido (ver arriba). */
+function loadCommonGroupsIntoModal(accountId, chatId, title, body, close) {
+  api(`/accounts/${accountId}/dialogs/${chatId}/common-groups`)
+    .then((res) => {
+      body.innerHTML = "";
+      const groups = res.groups || [];
+      if (!groups.length) {
+        body.appendChild(el("div", { class: "empty" }, "Este cliente todavía no tiene grupo restringido. Pulsa 👥 en la cabecera del chat para crearlo."));
+        return;
+      }
+      body.appendChild(el("div", { class: "hint" }, 'Este cliente todavía no tiene su grupo restringido (pulsa 👥 para crearlo). Si alguno de estos YA es su grupo de verdad (p.ej. lo creasteis a mano, o el chat del cliente se renombró con notas de venta y por eso no se detectó solo), pulsa "Usar este" para que el CRM lo recuerde y no vuelva a ofrecer crear uno nuevo.'));
+      const list = el("div", { class: "common-groups-list" });
+      groups.forEach((g) => {
+        const row = el("div", { class: "common-group-row" });
+        const openBtn = el("button", { type: "button", class: "common-group-row-open" }, g.title || "(sin nombre)");
+        openBtn.addEventListener("click", () => {
+          close();
+          openChat(accountId, { chatId: g.chatId, title: g.title || `Grupo con ${title}` });
+        });
+        const useBtn = el("button", { type: "button", class: "ghost sm common-group-row-use", title: "Usar este grupo como el restringido de este cliente" }, "Usar este");
+        useBtn.addEventListener("click", async (e) => {
+          e.stopPropagation();
+          useBtn.disabled = true;
+          useBtn.textContent = "Usando...";
+          try {
+            await api(`/accounts/${accountId}/dialogs/${chatId}/restricted-group/adopt`, {
+              method: "POST",
+              body: JSON.stringify({ groupChatId: g.chatId, groupTitle: g.title || null }),
+            });
+            toast("Grupo asignado como el restringido de este cliente");
+            close();
+            openChat(accountId, { chatId: g.chatId, title: g.title || `Grupo con ${title}` });
+          } catch (err) {
+            toast(err.message, true);
+            useBtn.disabled = false;
+            useBtn.textContent = "Usar este";
+          }
+        });
+        row.appendChild(openBtn);
+        row.appendChild(useBtn);
+        list.appendChild(row);
+      });
+      body.appendChild(list);
+    })
+    .catch((err) => {
+      body.innerHTML = "";
+      body.appendChild(el("div", { class: "empty" }, err.message || "No se pudieron cargar los grupos en común."));
+    });
+}
+
+/** Cuando Telegram no deja añadir al cliente directamente (privacidad), el
+ * backend ya intenta mandarle el enlace de invitación por privado él solo
+ * (linkSent=true: no hace falta hacer nada más). Solo si eso también falló
+ * copiamos el enlace al portapapeles, como respaldo, para que el chatter
+ * pueda pegárselo él mismo por privado. */
+function copyInviteLinkAndToast(inviteLink, message, linkSent) {
+  if (linkSent) {
+    toast(message, true);
+  } else if (inviteLink && navigator.clipboard?.writeText) {
     navigator.clipboard.writeText(inviteLink).then(
       () => toast(`${message} Enlace copiado al portapapeles.`, true),
       () => toast(`${message} Enlace: ${inviteLink}`, true)
@@ -4604,7 +5454,7 @@ function buildChatHeaderIconsRow(accountId, chatId, title) {
       await api(`/accounts/${accountId}/dialogs/${chatId}/restricted-group/retry-add`, { method: "POST" });
       toast("Cliente añadido al grupo");
     } catch (err) {
-      copyInviteLinkAndToast(err.data?.inviteLink, err.message);
+      copyInviteLinkAndToast(err.data?.inviteLink, err.message, err.data?.linkSentToFan);
       noForwardsBtn.style.display = "";
     }
   });
@@ -4628,7 +5478,7 @@ function buildChatHeaderIconsRow(accountId, chatId, title) {
         // no hay nada útil que hacer ahí. Nos quedamos en el chat privado de
         // siempre y dejamos visible el botón 🔒 justo aquí, como alternativa
         // que no depende de que el cliente entre a ningún grupo.
-        copyInviteLinkAndToast(res.inviteLink, res.warning || "Grupo creado, pero el cliente no quedó dentro.");
+        copyInviteLinkAndToast(res.inviteLink, res.warning || "Grupo creado, pero el cliente no quedó dentro.", res.linkSentToFan);
         noForwardsBtn.style.display = "";
       } else {
         toast(res.created ? "Grupo restringido creado" : "Abriendo grupo restringido");
@@ -5078,7 +5928,33 @@ function chatBubble(m, accountId, chatId) {
   if (m.mediaType) content.push(chatBubbleMediaEl(accountId, chatId, m));
   if (m.text) content.push(el("div", { class: "chat-bubble-text" }, m.text));
 
-  const footer = [el("div", { class: "chat-bubble-time" }, fmtDate(m.date))];
+  const footer = [el("div", { class: "chat-bubble-time" }, m.pending ? "" : fmtDate(m.date))];
+  // Tick de enviado/leído (como Telegram/TeleCrew): solo en nuestros propios
+  // mensajes (m.out) - un ✓ gris en cuanto se envía, ✓✓ en color de acento
+  // en cuanto el backend confirma que el fan lo ha leído (m.read, ver
+  // GET .../messages y UpdateReadHistoryOutbox en liveEvents.ts). Si nunca
+  // llega ese aviso se queda en ✓ para siempre - no significa "no
+  // entregado", solo "todavía sin confirmación de lectura".
+  //
+  // m.pending (burbuja optimista, ver el "send()" del composer): todavía no
+  // hay confirmación de Telegram de que el mensaje salió, así que en vez del
+  // tick se enseña un reloj - en cuanto el envío real termina, este bubble
+  // se sustituye por el definitivo (con su tick normal), nunca se queda con
+  // el reloj puesto para siempre.
+  // Qué chatter lo mandó (m.sentBy, ver GET .../messages): va justo antes
+  // de la hora, en la misma línea del tick - solo en nuestros propios
+  // mensajes. m.pending usa currentChatterDisplayName() directamente (la
+  // burbuja optimista no ha pasado aún por el backend, ver send() más
+  // abajo); el resto usa lo que diga el servidor, que puede quedar vacío en
+  // mensajes de antes de que esto existiera.
+  if ((m.pending || m.out) && m.sentBy) {
+    footer.push(el("span", { class: "chat-bubble-sentby" }, m.sentBy));
+  }
+  if (m.pending) {
+    footer.push(el("span", { class: "chat-bubble-tick chat-bubble-tick-pending" }, "🕐"));
+  } else if (m.out) {
+    footer.push(el("span", { class: "chat-bubble-tick" + (m.read ? " read" : "") }, m.read ? "✓✓" : "✓"));
+  }
   // Solo en SFS → Chat (mensajesState.sfsMode): cada mensaje se puede
   // reenviar directo al canal/grupo fijo de SFS (Account.sfsGroupChatId,
   // elegido en la pestaña "Grupo SFS"), ocultando siempre el remitente -
@@ -5109,9 +5985,38 @@ function chatBubble(m, accountId, chatId) {
     });
     footer.push(fwdBtn);
   }
+  // Borrar un mensaje enviado desde el CRM (solo los nuestros ya enviados).
+  // Se borra también en Telegram y queda registrado en Informes → Dashboard →
+  // Mensajes borrados (texto, fan, chatter que lo envió y quién lo borró).
+  let bubbleEl = null;
+  if (m.out && !m.pending && m.id != null) {
+    const delBtn = el("button", { type: "button", class: "chat-bubble-delete", title: "Borrar mensaje (queda registrado)" }, "🗑");
+    delBtn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      if (!confirm("¿Borrar este mensaje?\n\nSe borrará también para el fan en Telegram y quedará registrado en Informes → Dashboard → Mensajes borrados (con tu nombre).")) return;
+      delBtn.disabled = true;
+      try {
+        await api(`/accounts/${accountId}/dialogs/${chatId}/messages/${m.id}`, {
+          method: "DELETE",
+          body: JSON.stringify({ text: m.text || "" }),
+        });
+        if (bubbleEl) bubbleEl.remove();
+        toast("Mensaje borrado");
+      } catch (err) {
+        delBtn.disabled = false;
+        toast(err.message, true);
+      }
+    });
+    footer.push(delBtn);
+  }
   content.push(el("div", { class: "chat-bubble-footer" }, footer));
 
-  return el("div", { class: "chat-bubble " + (m.out ? "out" : "in") }, content);
+  // Opacidad reducida mientras está "pendiente" (optimista, aún sin
+  // confirmar por Telegram) - con estilo en línea para no tocar el CSS, se
+  // quita sola en cuanto este bubble se sustituye por el definitivo.
+  const bubbleAttrs = m.pending ? { class: "chat-bubble " + (m.out ? "out" : "in"), style: "opacity:0.6" } : { class: "chat-bubble " + (m.out ? "out" : "in") };
+  bubbleEl = el("div", bubbleAttrs, content);
+  return bubbleEl;
 }
 
 function makeLoadOlderBtn(accountId, chatId, title, chatPane) {
@@ -5177,7 +6082,116 @@ async function renderChat(accountId, chatId, title, chatPane, silent, opts = {})
   const loadOlder = !!opts.loadOlder;
   const forceScrollBottom = !!opts.forceScrollBottom;
   const renderToken = loadOlder ? null : nextRenderToken(chatPane);
+  // Lo último que se sabe de esta conversación (de la caché al abrir, o lo
+  // que traiga el fetch de más abajo en cuanto responda) - en un objeto
+  // mutable (no una variable `messages` normal) para que la barra de
+  // enviar, creada ANTES de que el fetch termine (ver ensureComposer más
+  // abajo), pueda leer siempre el valor más reciente sin tener que
+  // recrearse.
+  const chatDataRef = { messages: [] };
+  const ensureComposer = () => {
+    if (chatPane.querySelector(".chat-composer")) return;
+      const input = createRichComposerInput(accountId);
+      const sendBtn = el("button", { class: "primary chat-send-btn", title: "Enviar" }, "➤");
+      const previewBox = el("div", { class: "premium-preview hidden" });
+      input._previewEl = previewBox;
+      input.addEventListener("input", () => { syncPremiumEntities(input); refreshPremiumPreview(input); });
+      const send = async () => {
+        // No se recorta aqui (solo se comprueba que no este vacio): si un
+        // script trajo emoji premium, sus offsets se calcularon sobre
+        // input.value SIN recortar - el propio backend se encarga de
+        // recortar el texto y desplazar las entidades a la vez, para que no
+        // se desincronicen entre sí.
+        const rawText = input.value;
+        if (!rawText.trim()) return;
+        const entities = input._premiumEntities && input._premiumEntities.length > 0 ? input._premiumEntities : undefined;
+        input.value = "";
+        input._lastValue = "";
+        input._premiumEntities = [];
+        refreshPremiumPreview(input);
+        sendBtn.disabled = true;
+
+        // Burbuja optimista: se pinta YA, sin esperar a que Telegram
+        // confirme el envío (antes el mensaje no aparecía hasta que
+        // terminaban DOS viajes de ida y vuelta a Telegram seguidos - el
+        // propio envío y el recargar la conversación entera después). Se
+        // añade directamente al DOM (no pasa por el `messages` de este
+        // cierre, que sigue siendo "lo último que confirmó el servidor")
+        // para no interferir con la detección de cambios de renderChat; el
+        // renderChat de más abajo la sustituye sola por la burbuja de
+        // verdad en cuanto hay respuesta.
+        const messagesElNow = chatPane.querySelector(".chat-messages");
+        let pendingBubble = null;
+        if (messagesElNow) {
+          pendingBubble = chatBubble(
+            { text: rawText.trim(), out: true, date: new Date().toISOString(), pending: true, sentBy: currentChatterDisplayName() },
+            accountId,
+            chatId
+          );
+          messagesElNow.appendChild(pendingBubble);
+          messagesElNow.scrollTop = messagesElNow.scrollHeight;
+          messagesElNow.dataset.stickBottom = "1";
+        }
+        try {
+          // lastFanMessageAt: el último mensaje del fan que ya teníamos
+          // cargado en pantalla, para que el Dashboard de Informes pueda
+          // calcular el "Tiempo de respuesta" sin tener que volver a pedirle
+          // el historial a Telegram solo para eso.
+          const lastIncoming = [...chatDataRef.messages].reverse().find((m) => !m.out && m.date);
+          await api(`/accounts/${accountId}/dialogs/${chatId}/send`, {
+            method: "POST",
+            body: JSON.stringify({ text: rawText, chatTitle: title, lastFanMessageAt: lastIncoming ? lastIncoming.date : null, entities }),
+          });
+          bumpDialogAfterSend(accountId, chatId, rawText);
+          // Trae la conversación de verdad (con el mensaje real ya dentro) y
+          // de paso sustituye, al reconstruir todo el contenido, la burbuja
+          // optimista de arriba por la definitiva.
+          await renderChat(accountId, chatId, title, chatPane, true, { forceScrollBottom: true });
+        } catch (err) {
+          // El envío falló de verdad: quitamos la burbuja optimista (nunca
+          // llegó a Telegram) y devolvemos el texto al cuadro de escritura
+          // en vez de perderlo - antes, si el envío fallaba, el texto ya se
+          // había borrado del input y solo quedaba el aviso del error.
+          if (pendingBubble) pendingBubble.remove();
+          input.value = rawText;
+          input._lastValue = rawText;
+          input._premiumEntities = entities || [];
+          refreshPremiumPreview(input);
+          input.focus();
+          toast(err.message, true);
+        } finally {
+          sendBtn.disabled = false;
+        }
+      };
+      sendBtn.addEventListener("click", send);
+      input.addEventListener("keydown", (e) => { if (e.key === "Enter") send(); });
+
+      const scriptsBar = el("div", { class: "scripts-bar" });
+      renderScriptsBar(scriptsBar, accountId, input);
+
+      const folderBtn = el("button", { type: "button", class: "composer-icon-btn", title: "Contenido de la modelo" }, "📁");
+      folderBtn.addEventListener("click", () => openContentLibraryModal(accountId, chatId, chatPane));
+
+      const clockBtn = el("button", { type: "button", class: "composer-icon-btn", title: "Programar este mensaje" }, "🕐");
+      clockBtn.addEventListener("click", () => openMessageScheduleModal(accountId, chatId, input, chatPane));
+
+      const emojiBtn = el("button", { type: "button", class: "composer-icon-btn", title: "Emoji y letras premium" }, "🙂");
+      emojiBtn.addEventListener("click", (e) => { e.stopPropagation(); toggleEmojiPicker(emojiBtn, input, accountId, chatId); });
+
+      const iconsRow = el("div", { class: "composer-icons-row" }, [folderBtn, clockBtn, emojiBtn]);
+
+      const quickReplyPanel = renderQuickReplyPicker(iconsRow, accountId, chatId, input, () => renderChat(accountId, chatId, title, chatPane, true, { forceScrollBottom: true }));
+
+      const composerWrap = el("div", { class: "chat-composer-wrap" }, [
+        scriptsBar,
+        quickReplyPanel,
+        previewBox,
+        el("div", { class: "chat-composer" }, [iconsRow, input, sendBtn]),
+      ]);
+      chatPane.appendChild(composerWrap);
+  };
   if (!silent && !loadOlder) {
+    const cached = chatMessagesCache.get(`${accountId}:${chatId}`);
     chatPane.innerHTML = "";
     chatPane.appendChild(el("div", { class: "chat-header" }, [
       chatHeaderBackBtn(),
@@ -5185,7 +6199,37 @@ async function renderChat(accountId, chatId, title, chatPane, silent, opts = {})
       buildChatHeaderNameBlock(accountId, chatId, title),
       buildChatHeaderIconsRow(accountId, chatId, title),
     ]));
-    chatPane.appendChild(el("div", { class: "chat-messages" }, el("div", { class: "empty" }, "Cargando conversación...")));
+    if (cached) {
+      // Ya vimos este chat antes en esta sesion de navegador (al abrirlo la
+      // primera vez, o en un refresco silencioso anterior): se pinta YA con
+      // lo ultimo que sabiamos, sin esperar al servidor. La peticion de mas
+      // abajo sigue su curso igual que siempre para traer lo mas reciente -
+      // si no hay nada nuevo, el chequeo de firma (mas abajo) no vuelve a
+      // tocar el DOM; si hay algo nuevo, se repinta solo encima de esto.
+      chatDataRef.messages = cached.messages;
+      const cachedMessagesEl = el("div", { class: "chat-messages" });
+      if (cached.hasMore && cached.messages.length > 0) {
+        cachedMessagesEl.dataset.oldestId = cached.messages[0].id;
+        cachedMessagesEl.appendChild(makeLoadOlderBtn(accountId, chatId, title, chatPane));
+      }
+      if (cached.messages.length === 0) {
+        cachedMessagesEl.appendChild(el("div", { class: "empty" }, "Sin mensajes todavía."));
+      } else {
+        appendChatMessagesWithDividers(cachedMessagesEl, cached.messages, accountId, chatId);
+      }
+      cachedMessagesEl.dataset.msgSignature = cached.signature;
+      chatPane.appendChild(cachedMessagesEl);
+      bindChatScrollTracking(cachedMessagesEl);
+      cachedMessagesEl.scrollTop = cachedMessagesEl.scrollHeight;
+      cachedMessagesEl.dataset.stickBottom = "1";
+    } else {
+      chatPane.appendChild(el("div", { class: "chat-messages" }, el("div", { class: "empty" }, "Cargando conversación...")));
+    }
+    // La barra de enviar se crea YA, aquí mismo, sin esperar a que
+    // responda Telegram (ver el comentario grande más abajo sobre por qué
+    // esto se separó del resto del pintado) - así se puede escribir y
+    // mandar un mensaje aunque el historial tarde en cargar.
+    ensureComposer();
   }
   try {
     let url = `/accounts/${accountId}/dialogs/${chatId}/messages`;
@@ -5251,93 +6295,43 @@ async function renderChat(accountId, chatId, title, chatPane, silent, opts = {})
     // lo mismo que ya habia - trabajo de sobra que se notaba como un tirón
     // sutil cada 20 segundos en conversaciones con muchos mensajes.
     const msgSignature = messages.map((m) => `${m.id}:${m.text}:${m.out}:${m.mediaType || ""}`).join(";") + "|" + hasMore;
-    if (silent && messagesEl.dataset.msgSignature === msgSignature) {
-      // Aunque el contenido no haya cambiado, si esta llamada viene de
-      // "acabo de mandar un mensaje" (forceScrollBottom) sí bajamos el
-      // scroll: puede que un evento en vivo ya hubiera pintado ese mismo
-      // mensaje justo antes, pero el scroll se hubiera quedado a medias por
-      // el motivo explicado arriba.
-      if (forceScrollBottom) {
-        messagesEl.scrollTop = messagesEl.scrollHeight;
-        messagesEl.dataset.stickBottom = "1";
+    // Se guarda SIEMPRE lo ultimo sabido de este chat (se repinte o no ahora
+    // mismo), para que la proxima vez que se entre a el -o se vuelva a su
+    // pestaña ya abierta- se pueda pintar al instante desde aqui en vez de
+    // esperar otra vez al servidor (ver el bloque de "cached" mas arriba).
+    chatDataRef.messages = messages;
+    cacheSetCapped(chatMessagesCache, `${accountId}:${chatId}`, { messages, hasMore, signature: msgSignature }, 80);
+    // IMPORTANTE: antes, cuando la firma no habia cambiado, la funcion
+    // volvia aqui mismo (return) sin llegar NUNCA a la comprobacion/creacion
+    // de la barra de enviar mensaje de mas abajo - eso no era un problema
+    // mientras esa vuelta temprana solo pasaba en los refrescos "silent"
+    // (la barra ya se habia creado en la apertura inicial), pero al añadir
+    // el pintado instantaneo desde cache (arriba) empezo a pasar tambien en
+    // la apertura NORMAL de un chat ya visto antes - y entonces la barra de
+    // enviar mensajes nunca llegaba a crearse para ese chat. Ahora solo se
+    // salta el RE-PINTADO de las burbujas si no cambio nada; la
+    // comprobacion/creacion de la barra de enviar se hace SIEMPRE, haya
+    // cambiado algo o no.
+    const needsRepaint = messagesEl.dataset.msgSignature !== msgSignature;
+    if (needsRepaint) {
+      messagesEl.dataset.msgSignature = msgSignature;
+      messagesEl.innerHTML = "";
+      if (messages.length === 0) {
+        messagesEl.appendChild(el("div", { class: "empty" }, "Sin mensajes todavía."));
+      } else {
+        if (hasMore) {
+          messagesEl.dataset.oldestId = messages[0].id;
+          messagesEl.appendChild(makeLoadOlderBtn(accountId, chatId, title, chatPane));
+        }
+        appendChatMessagesWithDividers(messagesEl, messages, accountId, chatId);
       }
-      return;
     }
-    messagesEl.dataset.msgSignature = msgSignature;
-
-    messagesEl.innerHTML = "";
-    if (messages.length === 0) {
-      messagesEl.appendChild(el("div", { class: "empty" }, "Sin mensajes todavía."));
-    } else {
-      if (hasMore) {
-        messagesEl.dataset.oldestId = messages[0].id;
-        messagesEl.appendChild(makeLoadOlderBtn(accountId, chatId, title, chatPane));
-      }
-      appendChatMessagesWithDividers(messagesEl, messages, accountId, chatId);
-    }
-    if (!silent || wasNearBottom || forceScrollBottom) {
+    if (forceScrollBottom || !silent || (needsRepaint && wasNearBottom)) {
       messagesEl.scrollTop = messagesEl.scrollHeight;
       messagesEl.dataset.stickBottom = "1";
     }
 
-    if (!chatPane.querySelector(".chat-composer")) {
-      const input = el("input", { class: "chat-composer-input", placeholder: "Escribe un mensaje..." });
-      const sendBtn = el("button", { class: "primary chat-send-btn", title: "Enviar" }, "➤");
-      const send = async () => {
-        // No se recorta aqui (solo se comprueba que no este vacio): si un
-        // script trajo emoji premium, sus offsets se calcularon sobre
-        // input.value SIN recortar - el propio backend se encarga de
-        // recortar el texto y desplazar las entidades a la vez, para que no
-        // se desincronicen entre sí.
-        const rawText = input.value;
-        if (!rawText.trim()) return;
-        const entities = input._premiumEntities && input._premiumEntities.length > 0 ? input._premiumEntities : undefined;
-        input.value = "";
-        input._premiumEntities = [];
-        sendBtn.disabled = true;
-        try {
-          // lastFanMessageAt: el último mensaje del fan que ya teníamos
-          // cargado en pantalla, para que el Dashboard de Informes pueda
-          // calcular el "Tiempo de respuesta" sin tener que volver a pedirle
-          // el historial a Telegram solo para eso.
-          const lastIncoming = [...messages].reverse().find((m) => !m.out && m.date);
-          await api(`/accounts/${accountId}/dialogs/${chatId}/send`, {
-            method: "POST",
-            body: JSON.stringify({ text: rawText, chatTitle: title, lastFanMessageAt: lastIncoming ? lastIncoming.date : null, entities }),
-          });
-          await renderChat(accountId, chatId, title, chatPane, true, { forceScrollBottom: true });
-        } catch (err) {
-          toast(err.message, true);
-        } finally {
-          sendBtn.disabled = false;
-        }
-      };
-      sendBtn.addEventListener("click", send);
-      input.addEventListener("keydown", (e) => { if (e.key === "Enter") send(); });
-
-      const scriptsBar = el("div", { class: "scripts-bar" });
-      renderScriptsBar(scriptsBar, accountId, input);
-
-      const folderBtn = el("button", { type: "button", class: "composer-icon-btn", title: "Contenido de la modelo" }, "📁");
-      folderBtn.addEventListener("click", () => openContentLibraryModal(accountId, chatId, chatPane));
-
-      const clockBtn = el("button", { type: "button", class: "composer-icon-btn", title: "Programar este mensaje" }, "🕐");
-      clockBtn.addEventListener("click", () => openMessageScheduleModal(accountId, chatId, input, chatPane));
-
-      const emojiBtn = el("button", { type: "button", class: "composer-icon-btn", title: "Emoji y letras premium" }, "🙂");
-      emojiBtn.addEventListener("click", (e) => { e.stopPropagation(); toggleEmojiPicker(emojiBtn, input, accountId, chatId); });
-
-      const iconsRow = el("div", { class: "composer-icons-row" }, [folderBtn, clockBtn, emojiBtn]);
-
-      const quickReplyPanel = renderQuickReplyPicker(iconsRow, accountId, chatId, input, () => renderChat(accountId, chatId, title, chatPane, true, { forceScrollBottom: true }));
-
-      const composerWrap = el("div", { class: "chat-composer-wrap" }, [
-        scriptsBar,
-        quickReplyPanel,
-        el("div", { class: "chat-composer" }, [iconsRow, input, sendBtn]),
-      ]);
-      chatPane.appendChild(composerWrap);
-    }
+    ensureComposer();
   } catch (err) {
     if (!silent) {
       chatPane.innerHTML = "";
@@ -5348,13 +6342,105 @@ async function renderChat(accountId, chatId, title, chatPane, silent, opts = {})
 
 // ---------- Emoji picker (icono junto al cuadro de texto) ----------
 
-const EMOJI_SET = [
-  "😀", "😁", "😂", "🤣", "😊", "😍", "🥰", "😘", "😉", "😜", "🤤", "😏",
-  "😢", "😭", "😡", "🥵", "🥶", "😴", "🤔", "🙄", "😳", "🤗", "🙈", "😇",
-  "🔥", "💦", "💋", "👅", "👀", "🍑", "🍆", "💕", "💖", "❤️", "🧡", "💛",
-  "💚", "💙", "💜", "🖤", "🤍", "💯", "✨", "⭐", "🎉", "👑", "💎", "🔞",
+const EMOJI_CATEGORIES = [
+  {
+    label: "Pícaros",
+    emojis: ["🔥", "💦", "💋", "👅", "👀", "🍑", "🍆", "😏", "😈", "👿", "💄", "👙", "👗", "💃", "🕺", "🛏️", "🌙", "🥵", "😩", "🤤"],
+  },
+  {
+    label: "Caras",
+    emojis: [
+      "😀", "😃", "😄", "😁", "😆", "😅", "🤣", "😂", "🙂", "🙃", "😉", "😊", "😇", "🥰", "😍", "🤩", "😘", "😗", "😚", "😙",
+      "😋", "😛", "😜", "🤪", "😝", "🤑", "🤗", "🤭", "🤫", "🤔", "🤐", "😐", "😑", "😶", "🙄", "😬", "🤥", "😌", "😔", "😪",
+      "🤤", "😴", "😷", "🤒", "🤕", "🤢", "🤮", "🤧", "🥵", "🥶", "🥴", "😵", "🤯", "🤠", "🥳", "😎", "🤓", "🧐", "😕", "🙁",
+      "☹️", "😮", "😯", "😲", "😳", "🥺", "😦", "😧", "😨", "😰", "😥", "😢", "😭", "😱", "😖", "😣", "😞", "😓", "😩", "😫",
+      "🥱", "😤", "😡", "😠", "🤬",
+    ],
+  },
+  {
+    label: "Gestos",
+    emojis: ["👋", "🤚", "🖐️", "✋", "🖖", "👌", "🤌", "🤏", "✌️", "🤞", "🤟", "🤘", "🤙", "👈", "👉", "👆", "👇", "☝️", "👍", "👎", "✊", "👊", "🤛", "🤜", "👏", "🙌", "👐", "🤲", "🙏", "✍️", "💅", "🤳", "💪"],
+  },
+  {
+    label: "Corazones",
+    emojis: ["❤️", "🧡", "💛", "💚", "💙", "💜", "🖤", "🤍", "🤎", "💔", "❣️", "💕", "💞", "💓", "💗", "💖", "💘", "💝", "💟", "💯", "💢", "💥", "💫", "✨", "🔥", "⭐", "🌟", "⚡", "💎", "👑", "🎉", "🎊", "🎁", "🔞", "✅", "❌", "❗", "❓"],
+  },
+  {
+    label: "Animales",
+    emojis: [
+      "🐶", "🐱", "🐭", "🐹", "🐰", "🦊", "🐻", "🐼", "🐨", "🐯", "🦁", "🐮", "🐷", "🐸", "🐵", "🙈", "🙉", "🙊", "🐔", "🐧",
+      "🐦", "🐤", "🦆", "🦅", "🦉", "🦇", "🐺", "🐴", "🦄", "🐝", "🦋", "🐢", "🐍", "🐙", "🦑", "🦀", "🐠", "🐬", "🐳", "🐋",
+      "🦈", "🐊", "🦓", "🐘", "🐪", "🐫", "🦒", "🐕", "🐩", "🐈", "🦃", "🦚", "🦜", "🐇", "🌵", "🌲", "🌴", "🌱", "🌿", "🍀",
+      "🌸", "🌹", "🌻", "🌼", "🌷", "💐", "🌊", "💧",
+    ],
+  },
+  {
+    label: "Comida",
+    emojis: [
+      "🍏", "🍎", "🍐", "🍊", "🍋", "🍌", "🍉", "🍇", "🍓", "🍈", "🍒", "🍑", "🥭", "🍍", "🥥", "🥑", "🍅", "🌽", "🥕", "🥐",
+      "🍞", "🧀", "🥚", "🍳", "🥞", "🥓", "🍗", "🍔", "🍟", "🍕", "🌭", "🌮", "🌯", "🥗", "🍝", "🍜", "🍣", "🍱", "🍤", "🍙",
+      "🍰", "🎂", "🧁", "🍭", "🍬", "🍫", "🍿", "🍩", "🍪", "🥜", "🍯", "🥛", "☕", "🍵", "🧃", "🥤", "🍺", "🍷", "🥂", "🍾",
+    ],
+  },
+  {
+    label: "Actividades",
+    emojis: ["⚽", "🏀", "🏈", "⚾", "🎾", "🏐", "🏓", "🏸", "🥊", "🎣", "🏋️", "🏄", "🏊", "🚴", "🏆", "🥇", "🎮", "🎲", "🎯", "🎳", "🎤", "🎧", "🎸", "🎹", "🎨", "🎬", "🎭", "💃", "🕺", "🎉"],
+  },
+  {
+    label: "Objetos",
+    emojis: [
+      "📱", "💻", "⌨️", "🖥️", "📷", "📸", "🔍", "💡", "📔", "📝", "💰", "💴", "💵", "💶", "💷", "💸", "💳", "💹", "✉️", "📩",
+      "📦", "✏️", "📁", "📅", "📌", "🔒", "🔑", "🔨", "⚙️", "🔗", "🛏️", "🚪", "🚿", "🛁", "🧴", "🚬", "🛒",
+    ],
+  },
+  {
+    label: "Banderas",
+    emojis: ["🏳️", "🏴", "🚩", "🏳️‍🌈", "🇪🇸", "🇺🇸", "🇲🇽", "🇨🇴", "🇦🇷", "🇻🇪", "🇬🇧", "🇫🇷", "🇮🇹", "🇩🇪", "🇧🇷", "🇵🇹"],
+  },
 ];
 
+// Lista única plana con TODOS los emojis de arriba, sin categorías ni
+// pestañas - el pedido explícito fue "una unica lista de TOOODOS los
+// emojis... NADA MAS" tras el bug de que las pestañas de categoría cerraban
+// el panel al pulsarlas. Deduplicada por si algún emoji aparece en más de
+// una categoría de origen.
+const ALL_EMOJIS = [...new Set(EMOJI_CATEGORIES.flatMap((c) => c.emojis))];
+
+const RECENT_EMOJIS_KEY = "luxe_recent_emojis";
+const RECENT_EMOJIS_MAX = 24;
+
+function getRecentEmojis() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(RECENT_EMOJIS_KEY) || "[]");
+    return Array.isArray(raw) ? raw : [];
+  } catch {
+    return [];
+  }
+}
+
+function pushRecentEmoji(emoji) {
+  try {
+    const list = getRecentEmojis().filter((e) => e !== emoji);
+    list.unshift(emoji);
+    localStorage.setItem(RECENT_EMOJIS_KEY, JSON.stringify(list.slice(0, RECENT_EMOJIS_MAX)));
+  } catch {
+    /* localStorage puede fallar (modo privado, cuota...) - no es crítico */
+  }
+}
+const RECENT_PREMIUM_MAX = 32;
+function getRecentPremium(accountId) {
+  try {
+    const v = JSON.parse(localStorage.getItem("luxe_recent_premium:" + accountId) || "[]");
+    return Array.isArray(v) ? v : [];
+  } catch { return []; }
+}
+function pushRecentPremium(accountId, item) {
+  try {
+    const list = getRecentPremium(accountId).filter((e) => e.documentId !== item.documentId);
+    list.unshift(item);
+    localStorage.setItem("luxe_recent_premium:" + accountId, JSON.stringify(list.slice(0, RECENT_PREMIUM_MAX)));
+  } catch {}
+}
 let openEmojiPanel = null;
 
 function toggleEmojiPicker(anchorBtn, input, accountId, chatId) {
@@ -5370,27 +6456,70 @@ function toggleEmojiPicker(anchorBtn, input, accountId, chatId) {
   const body = el("div", {});
   panel.appendChild(body);
 
-  function renderNormal() {
-    body.innerHTML = "";
+  function insertEmoji(emoji) {
+    const start = input.selectionStart ?? input.value.length;
+    const end = input.selectionEnd ?? input.value.length;
+    input.value = input.value.slice(0, start) + emoji + input.value.slice(end);
+    input.focus();
+    input.selectionStart = input.selectionEnd = start + emoji.length;
+    pushRecentEmoji(emoji);
+  }
+
+  function makeEmojiGrid(emojis) {
     const grid = el("div", { class: "emoji-picker-grid" });
-    for (const emoji of EMOJI_SET) {
+    for (const emoji of emojis) {
       const btn = el("div", { class: "emoji-picker-item" }, emoji);
       btn.addEventListener("click", () => {
-        const start = input.selectionStart ?? input.value.length;
-        const end = input.selectionEnd ?? input.value.length;
-        input.value = input.value.slice(0, start) + emoji + input.value.slice(end);
-        input.focus();
-        input.selectionStart = input.selectionEnd = start + emoji.length;
+        insertEmoji(emoji);
+        renderNormal(); // refresca "Recientes" con el que se acaba de usar
       });
       grid.appendChild(btn);
     }
-    body.appendChild(grid);
+    return grid;
+  }
+
+  // Sin pestañas de categorías: una sola lista con TODOS los emojis, y
+  // arriba "Recientes" con los últimos usados (guardados en este navegador).
+  function renderNormal() {
+    body.innerHTML = "";
+    const recent = getRecentEmojis();
+    if (recent.length > 0) {
+      body.appendChild(el("div", { class: "emoji-picker-section-label" }, "Recientes"));
+      body.appendChild(makeEmojiGrid(recent));
+    }
+    body.appendChild(el("div", { class: "emoji-picker-section-label" }, "Todos"));
+    body.appendChild(makeEmojiGrid(ALL_EMOJIS));
   }
 
   async function renderPremium() {
     body.innerHTML = "";
     body.appendChild(el("div", { class: "emoji-picker-hint" },
-      "Al hacer click se manda directo al chat (no se inserta en el texto). Solo se ve animado si esta cuenta tiene Telegram Premium."));
+      "Al hacer click se añade al cuadro de mensaje (puedes poner varios y escribir texto). Se envía con ➤. Solo se ve animado si esta cuenta tiene Telegram Premium."));
+    // Primer apartado: los emojis premium usados hace poco EN ESTA creadora.
+    const recentWrap = el("div", {});
+    body.appendChild(recentWrap);
+    const renderRecentPremium = () => {
+      recentWrap.innerHTML = "";
+      const recent = getRecentPremium(accountId);
+      if (recent.length === 0) return;
+      recentWrap.appendChild(el("div", { class: "emoji-picker-section-label" }, "Recientes"));
+      const g = el("div", { class: "emoji-picker-grid" });
+      for (const r of recent) {
+        const item = el("img", {
+          class: "emoji-picker-premium-item",
+          src: `${API_BASE}/accounts/${accountId}/emoji-packs/${r.packId}/emoji-thumb/${r.documentId}`,
+          loading: "lazy",
+        });
+        item.addEventListener("click", () => {
+          insertPremiumEmojiIntoComposer(input, r.documentId, r.alt, r.packId, accountId);
+          pushRecentPremium(accountId, r);
+          renderRecentPremium();
+        });
+        g.appendChild(item);
+      }
+      recentWrap.appendChild(g);
+    };
+    renderRecentPremium();
     const gridWrap = el("div", {}, el("div", { class: "empty" }, "Cargando..."));
     body.appendChild(gridWrap);
     try {
@@ -5401,10 +6530,9 @@ function toggleEmojiPicker(anchorBtn, input, accountId, chatId) {
         return;
       }
       gridWrap.innerHTML = "";
-      for (const pack of packs) {
-        const packGrid = el("div", { class: "emoji-picker-grid" });
-        gridWrap.appendChild(el("div", { class: "hint", style: "margin:6px 0 2px" }, pack.title || pack.shortName));
-        gridWrap.appendChild(packGrid);
+      // Con decenas de packs, cada uno se carga solo cuando se hace visible al
+      // bajar (antes se pedian todos uno detras de otro y tardaba una eternidad).
+      const loadPack = async (pack, packGrid) => {
         try {
           const { emojis } = await api(`/accounts/${accountId}/emoji-packs/${pack.id}/emojis`);
           for (const em of emojis) {
@@ -5413,25 +6541,37 @@ function toggleEmojiPicker(anchorBtn, input, accountId, chatId) {
               src: `${API_BASE}/accounts/${accountId}/emoji-packs/${pack.id}/emoji-thumb/${em.documentId}`,
               loading: "lazy",
             });
-            item.addEventListener("click", async () => {
-              item.style.opacity = "0.4";
-              try {
-                await api(`/accounts/${accountId}/dialogs/${chatId}/send-custom-emoji`, {
-                  method: "POST",
-                  body: JSON.stringify({ packId: pack.id, documentId: em.documentId }),
-                });
-                toast("Emoji enviado");
-                panel.remove();
-                openEmojiPanel = null;
-              } catch (err) {
-                toast(err.message, true);
-                item.style.opacity = "1";
-              }
+            item.addEventListener("click", () => {
+              insertPremiumEmojiIntoComposer(input, em.documentId, em.alt, pack.id, accountId);
+              pushRecentPremium(accountId, { documentId: em.documentId, alt: em.alt, packId: pack.id });
+              renderRecentPremium();
             });
             packGrid.appendChild(item);
           }
         } catch {
-          gridWrap.appendChild(el("div", { class: "empty" }, "No se pudo cargar este pack."));
+          packGrid.appendChild(el("div", { class: "empty" }, "No se pudo cargar este pack."));
+        }
+      };
+      const observer = "IntersectionObserver" in window
+        ? new IntersectionObserver((entries) => {
+            for (const e of entries) {
+              if (!e.isIntersecting) continue;
+              observer.unobserve(e.target);
+              const fn = e.target._loadPack;
+              if (fn) fn();
+            }
+          }, { root: body, rootMargin: "300px" })
+        : null;
+      for (const pack of packs) {
+        const packGrid = el("div", { class: "emoji-picker-grid" });
+        gridWrap.appendChild(el("div", { class: "hint", style: "margin:6px 0 2px" }, pack.title || pack.shortName));
+        gridWrap.appendChild(packGrid);
+        if (observer) {
+          packGrid.style.minHeight = "36px";
+          packGrid._loadPack = () => loadPack(pack, packGrid);
+          observer.observe(packGrid);
+        } else {
+          await loadPack(pack, packGrid);
         }
       }
     } catch (err) {
@@ -5456,8 +6596,18 @@ function toggleEmojiPicker(anchorBtn, input, accountId, chatId) {
   anchorBtn.parentElement.appendChild(panel);
   openEmojiPanel = panel;
 
+  // Ojo: NO usar panel.contains(e.target) aquí. Varios clicks de dentro del
+  // panel (elegir un emoji, cambiar "Recientes"...) reconstruyen el HTML
+  // interno (innerHTML = "") antes de que este listener (en el document,
+  // llega por bubbling DESPUÉS del listener propio del botón) se ejecute -
+  // en ese momento e.target ya está desenganchado del árbol del DOM y
+  // panel.contains(e.target) da false aunque el click fuera claramente
+  // dentro del panel, cerrándolo por error. composedPath() sí vale: se
+  // calcula al iniciar la propagación del evento, antes de cualquier
+  // mutación del DOM que hagan los propios listeners.
   const closeOnOutsideClick = (e) => {
-    if (!panel.contains(e.target) && e.target !== anchorBtn) {
+    const path = typeof e.composedPath === "function" ? e.composedPath() : [];
+    if (!path.includes(panel) && e.target !== anchorBtn) {
       panel.remove();
       openEmojiPanel = null;
       document.removeEventListener("click", closeOnOutsideClick);
@@ -5804,6 +6954,12 @@ function openContentLibraryModal(accountId, chatId, chatPane) {
           const badge = contentTypeBadge(it);
           if (badge) wrap.appendChild(el("div", { class: "content-item-type-badge" }, badge));
           if (it.mediaCount > 1) wrap.appendChild(el("div", { class: "content-item-count" }, "+" + it.mediaCount));
+          // "YA ENVIADO": este contenido ya se le mando a ESTE fan en algun
+          // momento (ver alreadySentToChat, calculado en el backend a
+          // partir de ContentSendLog.sourceMessageId) - para que el chatter
+          // no tenga que acordarse o ir a mirar el historial del chat antes
+          // de volver a mandar algo.
+          if (it.alreadySentToChat) wrap.appendChild(el("div", { class: "content-item-sent-badge" }, "YA ENVIADO"));
           wrap.appendChild(el("div", { class: "content-item-ver-overlay" }, "👁 VER"));
 
           const favBtn = el("button", { type: "button", class: "content-item-fav-btn" + (it.isFavorite ? " active" : ""), title: "Marcar como favorito" }, it.isFavorite ? "★" : "☆");
@@ -5827,7 +6983,9 @@ function openContentLibraryModal(accountId, chatId, chatPane) {
          * una vez" (se autodestruye al abrirlo), igual que TeleCrew. */
         function openContentViewer(it, gridFavBtn, gridCard) {
           openModal((viewerModal, closeViewer) => {
-            viewerModal.appendChild(el("h3", {}, it.caption || "Contenido"));
+            const titleRow = [it.caption || "Contenido"];
+            if (it.alreadySentToChat) titleRow.push(el("span", { class: "content-item-sent-badge content-item-sent-badge-inline" }, "YA ENVIADO"));
+            viewerModal.appendChild(el("h3", {}, titleRow));
             const mediaWrap = el("div", { class: "content-viewer-media-wrap" });
             if (!it.hasThumb) {
               // Mensaje de solo texto (sin foto/vídeo/audio): no hay nada
@@ -5901,13 +7059,25 @@ function openContentLibraryModal(accountId, chatId, chatPane) {
                 if (onceCheckbox.checked) {
                   await api(`/accounts/${accountId}/content-group/send-once`, {
                     method: "POST",
-                    body: JSON.stringify({ chatId, messageId: it.id }),
+                    body: JSON.stringify({ chatId, messageId: it.id, sourceItemId: it.id }),
                   });
                 } else {
                   await api(`/accounts/${accountId}/content-group/send`, {
                     method: "POST",
-                    body: JSON.stringify({ chatId, messageIds: it.messageIds }),
+                    body: JSON.stringify({ chatId, messageIds: it.messageIds, sourceItemId: it.id }),
                   });
+                }
+                // Se marca YA como "YA ENVIADO" en la tarjeta, sin esperar a
+                // que se vuelva a abrir la bóveda para que se note - "ver
+                // una vez" se autodestruye en el chat, pero sigue contando
+                // como enviado para este efecto.
+                it.alreadySentToChat = true;
+                if (gridCard) {
+                  const existingBadge = gridCard.querySelector(".content-item-sent-badge");
+                  if (!existingBadge) {
+                    const wrap = gridCard.querySelector(".content-item-thumb-wrap");
+                    if (wrap) wrap.appendChild(el("div", { class: "content-item-sent-badge" }, "YA ENVIADO"));
+                  }
                 }
                 toast("Contenido enviado");
                 closeViewer();
@@ -5940,7 +7110,8 @@ function openContentLibraryModal(accountId, chatId, chatPane) {
           try {
             let items, hasMore, nextOffsetId;
             if (libState.filterMode === "favorites") {
-              const res = await api(`/accounts/${accountId}/content-group/favorites`);
+              const favQs = chatId ? `?chatId=${encodeURIComponent(chatId)}` : "";
+              const res = await api(`/accounts/${accountId}/content-group/favorites${favQs}`);
               items = res.items;
               hasMore = false;
               nextOffsetId = null;
@@ -5948,6 +7119,9 @@ function openContentLibraryModal(accountId, chatId, chatPane) {
               const params = new URLSearchParams();
               if (offsetId) params.set("offsetId", offsetId);
               if (libState.activeType !== "all") params.set("type", libState.activeType);
+              // chatId: para que cada tarjeta venga marcada "YA ENVIADO" si
+              // ya se le mando a ESTE fan antes (ver alreadySentToChat).
+              if (chatId) params.set("chatId", chatId);
               const qs = params.toString() ? `?${params.toString()}` : "";
               const res = await api(`/accounts/${accountId}/content-group/topics/${libState.activeTopic.id}/items${qs}`);
               items = res.items;
@@ -6113,6 +7287,300 @@ function renderQuickReplyPicker(iconsRow, accountId, chatId, input, onSent) {
   return panel;
 }
 
+/** Mantiene alineadas las entidades de emoji premium (input._premiumEntities)
+ * con el texto cuando se edita a mano el cuadro de mensaje: lo que se
+ * escribe/borra ANTES de un emoji lo desplaza, y si se borra el propio emoji
+ * se descarta su entidad. Compara el valor anterior con el nuevo. */
+function syncPremiumEntities(input) {
+  if (input._isRich) return; // la barra rica ya mantiene los emojis alineados por si sola
+  const oldV = input._lastValue || "";
+  const newV = input.value;
+  input._lastValue = newV;
+  if (oldV === newV || !input._premiumEntities || input._premiumEntities.length === 0) return;
+  let p = 0;
+  const minLen = Math.min(oldV.length, newV.length);
+  while (p < minLen && oldV[p] === newV[p]) p++;
+  let sfx = 0;
+  while (sfx < minLen - p && oldV[oldV.length - 1 - sfx] === newV[newV.length - 1 - sfx]) sfx++;
+  const delta = newV.length - oldV.length;
+  const removedEnd = oldV.length - sfx;
+  const kept = [];
+  for (const e of input._premiumEntities) {
+    if (e.offset + e.length <= p) kept.push(e);
+    else if (e.offset >= removedEnd) kept.push({ ...e, offset: e.offset + delta });
+  }
+  input._premiumEntities = kept;
+}
+
+/** Barra de mensaje "rica": un div editable que se comporta como el <input>
+ * de antes (value, selectionStart/End, setSelectionRange, focus, _premiumEntities)
+ * pero ensena los emojis premium como imagen DENTRO de la propia barra.
+ * Cada emoji premium es un nodo ".pe" (atomico) que cuenta como los
+ * caracteres de su emoji normal equivalente, asi los offsets de las
+ * entidades se calculan siempre sobre el texto plano que se envia.
+ * Si algo fallase, volver al <input> de siempre: git checkout antes-barra-emojis-rica */
+function createRichComposerInput(accountId) {
+  const box = el("div", {
+    class: "chat-composer-input chat-composer-editable",
+    contenteditable: "true",
+    role: "textbox",
+    "data-placeholder": "Escribe un mensaje...",
+    spellcheck: "true",
+  });
+  box._isRich = true;
+  const isPe = (n) => n.nodeType === 1 && n.classList.contains("pe");
+  const lenOf = (n) =>
+    n.nodeType === 3 ? n.data.length : isPe(n) ? (n.dataset.alt || "").length : n.nodeName === "BR" ? 0 : (n.textContent || "").length;
+  const textOf = (n) =>
+    n.nodeType === 3 ? n.data.replace(/\u00a0/g, " ") : isPe(n) ? (n.dataset.alt || "") : n.nodeName === "BR" ? "" : (n.textContent || "").replace(/\u00a0/g, " ");
+  const getValue = () => [...box.childNodes].map(textOf).join("");
+  const getEnts = () => {
+    const out = [];
+    let t = 0;
+    for (const c of box.childNodes) {
+      const l = lenOf(c);
+      if (isPe(c)) {
+        out.push({ offset: t, length: l, documentId: c.dataset.doc, packId: c.dataset.pack || undefined, accountId: c.dataset.acc || undefined });
+      }
+      t += l;
+    }
+    return out;
+  };
+  const makePe = (e, alt) => {
+    const acc = e.accountId || accountId;
+    let n;
+    if (e.packId && acc) {
+      n = document.createElement("img");
+      n.src = `${API_BASE}/accounts/${acc}/emoji-packs/${e.packId}/emoji-thumb/${e.documentId}`;
+      n.draggable = false;
+      n.alt = alt;
+    } else {
+      n = document.createElement("span");
+      n.textContent = alt;
+    }
+    n.className = "pe";
+    n.contentEditable = "false";
+    n.dataset.doc = e.documentId;
+    n.dataset.alt = alt;
+    n.dataset.pack = e.packId || "";
+    n.dataset.acc = acc || "";
+    return n;
+  };
+  const setContent = (text, ents) => {
+    box.innerHTML = "";
+    const list = (ents || []).filter((e) => e && e.documentId && e.length > 0).sort((a, b) => a.offset - b.offset);
+    let pos = 0;
+    for (const e of list) {
+      if (e.offset < pos || e.offset + e.length > text.length) continue;
+      if (e.offset > pos) box.appendChild(document.createTextNode(text.slice(pos, e.offset)));
+      box.appendChild(makePe(e, text.substr(e.offset, e.length)));
+      pos = e.offset + e.length;
+    }
+    if (pos < text.length) box.appendChild(document.createTextNode(text.slice(pos)));
+  };
+  const offsetOf = (container, off) => {
+    if (container === box) {
+      let t = 0;
+      for (let i = 0; i < off && i < box.childNodes.length; i++) t += lenOf(box.childNodes[i]);
+      return t;
+    }
+    let t = 0;
+    for (const c of box.childNodes) {
+      if (c === container) return t + (c.nodeType === 3 ? off : off > 0 ? lenOf(c) : 0);
+      if (c.contains && c.contains(container)) return t + (off > 0 ? lenOf(c) : 0);
+      t += lenOf(c);
+    }
+    return t;
+  };
+  const posOf = (offset) => {
+    let t = 0;
+    const kids = [...box.childNodes];
+    for (let i = 0; i < kids.length; i++) {
+      const c = kids[i];
+      const l = lenOf(c);
+      if (c.nodeType === 3) {
+        if (offset <= t + l) return [c, Math.max(0, offset - t)];
+      } else {
+        if (offset <= t) return [box, i];
+        if (offset < t + l) return [box, i + 1];
+      }
+      t += l;
+    }
+    return [box, kids.length];
+  };
+  const getSel = () => {
+    const sel = window.getSelection();
+    if (sel && sel.rangeCount && sel.anchorNode && box.contains(sel.anchorNode)) {
+      const r = sel.getRangeAt(0);
+      return [offsetOf(r.startContainer, r.startOffset), offsetOf(r.endContainer, r.endOffset)];
+    }
+    const len = getValue().length;
+    const last = box._lastSel || [len, len];
+    return [Math.min(last[0], len), Math.min(last[1], len)];
+  };
+  const setSel = (a, b) => {
+    const len = getValue().length;
+    a = Math.max(0, Math.min(a, len));
+    b = Math.max(a, Math.min(b, len));
+    try {
+      const r = document.createRange();
+      const [n1, o1] = posOf(a);
+      const [n2, o2] = posOf(b);
+      r.setStart(n1, o1);
+      r.setEnd(n2, o2);
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(r);
+    } catch {}
+    box._lastSel = [a, b];
+  };
+  const adapt = (ents, oldV, newV) => {
+    let p = 0;
+    const minLen = Math.min(oldV.length, newV.length);
+    while (p < minLen && oldV[p] === newV[p]) p++;
+    let sfx = 0;
+    while (sfx < minLen - p && oldV[oldV.length - 1 - sfx] === newV[newV.length - 1 - sfx]) sfx++;
+    const delta = newV.length - oldV.length;
+    const removedEnd = oldV.length - sfx;
+    const kept = [];
+    for (const e of ents) {
+      if (e.offset + e.length <= p) kept.push(e);
+      else if (e.offset >= removedEnd) kept.push({ ...e, offset: e.offset + delta });
+    }
+    return kept;
+  };
+  Object.defineProperties(box, {
+    value: {
+      get: getValue,
+      set(v) {
+        v = String(v == null ? "" : v);
+        const oldV = getValue();
+        if (oldV === v) return;
+        setContent(v, adapt(getEnts(), oldV, v));
+        box._lastSel = [v.length, v.length];
+      },
+    },
+    _premiumEntities: {
+      get: getEnts,
+      set(list) { setContent(getValue(), list || []); },
+    },
+    selectionStart: {
+      get() { return getSel()[0]; },
+      set(v) { setSel(v, Math.max(v, getSel()[1])); },
+    },
+    selectionEnd: {
+      get() { return getSel()[1]; },
+      set(v) { setSel(Math.min(getSel()[0], v), v); },
+    },
+  });
+  box.setSelectionRange = (a, b) => setSel(a, b);
+  // Inserta texto (y, si se pasa, un emoji premium) reemplazando la seleccion.
+  box._insertAt = (text, ent) => {
+    const [s0, e0] = getSel();
+    const v = getValue();
+    const ents = getEnts()
+      .filter((x) => x.offset + x.length <= s0 || x.offset >= e0)
+      .map((x) => (x.offset >= e0 ? { ...x, offset: x.offset - (e0 - s0) + text.length } : x));
+    if (ent) ents.push({ offset: s0, length: text.length, documentId: ent.documentId, packId: ent.packId, accountId: ent.accountId });
+    setContent(v.slice(0, s0) + text + v.slice(e0), ents);
+    setSel(s0 + text.length, s0 + text.length);
+    box.dispatchEvent(new Event("input"));
+  };
+  const save = () => { box._lastSel = getSel(); };
+  for (const ev of ["keyup", "mouseup", "blur", "input"]) box.addEventListener(ev, save);
+  box.addEventListener("input", () => {
+    if (!box.querySelector(".pe") && !(box.textContent || "").trim()) box.innerHTML = ""; // para que salga el placeholder
+  });
+  box.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") e.preventDefault(); // una sola linea, como antes; el envio lo gestiona el otro listener
+    if ((e.key === "Backspace" || e.key === "Delete") && !e.isComposing) {
+      // Borrar un emoji premium vecino al cursor (el navegador no siempre lo hace solo).
+      const [a, b] = getSel();
+      if (a === b) {
+        const ent = getEnts().find((x) => (e.key === "Backspace" ? x.offset + x.length === a : x.offset === a));
+        if (ent) {
+          e.preventDefault();
+          const v = getValue();
+          const rest = getEnts()
+            .filter((x) => x !== ent && !(x.offset === ent.offset))
+            .map((x) => (x.offset > ent.offset ? { ...x, offset: x.offset - ent.length } : x));
+          setContent(v.slice(0, ent.offset) + v.slice(ent.offset + ent.length), rest);
+          setSel(ent.offset, ent.offset);
+          box.dispatchEvent(new Event("input"));
+        }
+      }
+    }
+  });
+  box.addEventListener("paste", (e) => {
+    e.preventDefault();
+    const t = ((e.clipboardData || window.clipboardData).getData("text") || "").replace(/\s*\n\s*/g, " ");
+    if (t) box._insertAt(t);
+  });
+  box.addEventListener("drop", (e) => e.preventDefault());
+  return box;
+}
+
+/** Fila encima de la barra de mensaje que ENSENA los emojis premium elegidos
+ * (la barra en si es un campo de texto y solo puede mostrar el emoji normal
+ * equivalente). Click en uno para quitarlo. */
+function refreshPremiumPreview(input) {
+  const box = input._previewEl;
+  if (!box || input._isRich) return;
+  const ents = (input._premiumEntities || []).slice().sort((a, b) => a.offset - b.offset);
+  box.innerHTML = "";
+  box.classList.toggle("hidden", ents.length === 0);
+  for (const e of ents) {
+    const ch = input.value.substr(e.offset, e.length);
+    const chip = e.packId && e.accountId
+      ? el("img", {
+          class: "premium-preview-item",
+          title: "Quitar",
+          src: `${API_BASE}/accounts/${e.accountId}/emoji-packs/${e.packId}/emoji-thumb/${e.documentId}`,
+        })
+      : el("span", { class: "premium-preview-item premium-preview-char", title: "Quitar" }, ch);
+    chip.addEventListener("click", () => removePremiumEntity(input, e));
+    box.appendChild(chip);
+  }
+}
+
+function removePremiumEntity(input, e) {
+  const list = input._premiumEntities || [];
+  const idx = list.indexOf(e);
+  if (idx < 0) return;
+  list.splice(idx, 1);
+  for (const x of list) if (x.offset > e.offset) x.offset -= e.length;
+  input.value = input.value.slice(0, e.offset) + input.value.slice(e.offset + e.length);
+  input._lastValue = input.value;
+  refreshPremiumPreview(input);
+  input.focus();
+}
+
+/** Mete un emoji premium en el cuadro de mensaje (en la posicion del cursor)
+ * en vez de mandarlo: asi se puede escribir texto con el, o juntar varios
+ * emojis premium, y enviar todo junto con el boton de enviar. */
+function insertPremiumEmojiIntoComposer(input, documentId, alt, packId, accountId) {
+  if (input._isRich) {
+    input.focus();
+    input._insertAt(alt || "🙂", { documentId, packId, accountId });
+    return;
+  }
+  syncPremiumEntities(input);
+  if (!input._premiumEntities) input._premiumEntities = [];
+  const v = input.value;
+  let pos = typeof input.selectionStart === "number" ? input.selectionStart : v.length;
+  if (pos > v.length) pos = v.length;
+  const ch = alt || "🙂";
+  input.value = v.slice(0, pos) + ch + v.slice(pos);
+  for (const e of input._premiumEntities) {
+    if (e.offset >= pos) e.offset += ch.length;
+  }
+  input._premiumEntities.push({ offset: pos, length: ch.length, documentId, packId, accountId });
+  input._lastValue = input.value;
+  refreshPremiumPreview(input);
+  input.focus();
+  try { input.setSelectionRange(pos + ch.length, pos + ch.length); } catch {}
+}
+
 /** Inserta el texto de un script en el input del chat y, si tiene emoji
  * premium guardados, arrastra sus entidades a input._premiumEntities
  * (desplazadas por lo que ya hubiera escrito antes) para que el botón
@@ -6120,15 +7588,32 @@ function renderQuickReplyPicker(iconsRow, accountId, chatId, input, onSent) {
  * guardar nada que no sea texto plano - por eso las entidades viven aparte,
  * como una propiedad del propio elemento, no dentro de input.value. */
 function insertScriptIntoComposer(input, script) {
+  if (input._isRich) {
+    const prefix = input.value ? input.value + " " : "";
+    const baseOffset = prefix.length;
+    input.value = prefix + script.content; // conserva los emojis premium que ya hubiera
+    const cur = input._premiumEntities;
+    for (const e of script.entities || []) {
+      cur.push({ offset: baseOffset + e.offset, length: e.length, documentId: e.documentId });
+    }
+    input._premiumEntities = cur;
+    const end = input.value.length;
+    input.focus();
+    input.setSelectionRange(end, end);
+    return;
+  }
   const prefix = input.value ? input.value + " " : "";
   const baseOffset = prefix.length;
+  syncPremiumEntities(input);
   input.value = prefix + script.content;
+  input._lastValue = input.value;
   if (script.entities && script.entities.length > 0) {
     if (!input._premiumEntities) input._premiumEntities = [];
     for (const e of script.entities) {
       input._premiumEntities.push({ offset: baseOffset + e.offset, length: e.length, documentId: e.documentId });
     }
   }
+  refreshPremiumPreview(input);
 }
 
 function renderScriptsBar(bar, accountId, input) {
@@ -6350,9 +7835,16 @@ function renderNotesPanel(notesPane, accountId, chatId, chatTitle) {
     return;
   }
   let tab = "fan";
+  // El texto de la pestaña de precios lleva el nombre de la creadora
+  // ("PRECIOS (CLOE)") en vez del genérico "Precios modelo", para que se
+  // vea claro de qué cuenta son esos precios cuando se tienen varias
+  // creadoras abiertas en pestañas a la vez.
+  const accountForTab = state.accounts.find((a) => a.id === accountId);
+  const pricesTabLabel = accountForTab ? `PRECIOS (${accountForTab.label.toUpperCase()})` : "Precios modelo";
   const fanTabBtn = el("div", { class: "login-tab" + (tab === "fan" ? " active" : "") }, "Notas del fan");
   const modelTabBtn = el("div", { class: "login-tab" + (tab === "model" ? " active" : "") }, "Notas de la modelo");
-  const tabsRow = el("div", { class: "login-tabs" }, [fanTabBtn, modelTabBtn]);
+  const pricesTabBtn = el("div", { class: "login-tab" + (tab === "prices" ? " active" : "") }, pricesTabLabel);
+  const tabsRow = el("div", { class: "login-tabs" }, [fanTabBtn, modelTabBtn, pricesTabBtn]);
   const body = el("div", {});
   notesPane.appendChild(tabsRow);
   notesPane.appendChild(body);
@@ -6575,17 +8067,45 @@ function renderNotesPanel(notesPane, accountId, chatId, chatTitle) {
     });
   }
 
+  // "Precios modelo": igual que "Notas de la modelo" (una nota por cuenta,
+  // visible en todas sus conversaciones) pero en su propio campo
+  // (Account.pricesInfo, ya existente en Configuración -> Modelos -> esta
+  // creadora) para no mezclar precios con el resto de notas generales.
+  function renderPricesTab() {
+    body.innerHTML = "";
+    body.appendChild(el("div", { class: "hint" }, "Precios/tarifas de esta modelo, visibles en todas sus conversaciones - lo mismo que Configuración → Modelos → esta creadora → Precios."));
+    const priceArea = el("textarea", { rows: "14", placeholder: "Precios de esta modelo..." });
+    body.appendChild(el("div", { class: "field" }, [el("label", {}, "Precios modelo"), priceArea]));
+    const saveBtn = el("button", { class: "primary" }, "Guardar");
+    body.appendChild(saveBtn);
+    api(`/accounts/${accountId}/prices`).then((res) => { priceArea.value = res.prices || ""; }).catch(() => {});
+    saveBtn.addEventListener("click", async () => {
+      try {
+        await api(`/accounts/${accountId}/prices`, { method: "PUT", body: JSON.stringify({ prices: priceArea.value }) });
+        toast("Precios de la modelo guardados");
+      } catch (err) {
+        toast(err.message, true);
+      }
+    });
+  }
+
+  function setActiveTab(btn) {
+    for (const b of [fanTabBtn, modelTabBtn, pricesTabBtn]) b.classList.toggle("active", b === btn);
+  }
   fanTabBtn.addEventListener("click", () => {
     tab = "fan";
-    fanTabBtn.classList.add("active");
-    modelTabBtn.classList.remove("active");
+    setActiveTab(fanTabBtn);
     renderFanTab();
   });
   modelTabBtn.addEventListener("click", () => {
     tab = "model";
-    modelTabBtn.classList.add("active");
-    fanTabBtn.classList.remove("active");
+    setActiveTab(modelTabBtn);
     renderModelTab();
+  });
+  pricesTabBtn.addEventListener("click", () => {
+    tab = "prices";
+    setActiveTab(pricesTabBtn);
+    renderPricesTab();
   });
 
   renderFanTab();
@@ -6690,6 +8210,184 @@ function openEmojiPacksModal(accountId, label) {
   }, { wide: true });
 }
 
+function fmtCentsEUR(cents) {
+  const n = (cents || 0) / 100;
+  return (Number.isInteger(n) ? String(n) : n.toFixed(2).replace(".", ",")) + " €";
+}
+
+function daysLeftUntil(dateStr) {
+  if (!dateStr) return null;
+  const ms = new Date(dateStr).getTime() - Date.now();
+  return Math.ceil(ms / (24 * 60 * 60 * 1000));
+}
+
+/** Pantalla "Suscripción" de Configuración: mismo diseño y lógica que
+ * TeleCrew (cuota por modelo con descuento a partir de 5, prueba gratis,
+ * "Activar plan"/"Actualizar" con Stripe) - ver api/subscription.ts. */
+async function renderSuscripcionSection() {
+  appEl.innerHTML = "";
+  appEl.appendChild(el("h1", {}, "Suscripción"));
+  appEl.appendChild(el("p", { class: "subtitle" }, `Plan y facturación de ${state.isLegacyAgency ? "LUREQO" : (state.agencyBrandName || "tu agencia")}.`));
+
+  // Si venimos de vuelta del Checkout/portal de Stripe, avisamos una vez y
+  // limpiamos el parámetro de la URL para que no se repita al recargar.
+  const params = new URLSearchParams(window.location.search);
+  const suscripcionParam = params.get("suscripcion");
+  if (suscripcionParam) {
+    if (suscripcionParam === "ok") toast("¡Listo! Tu plan se está activando (puede tardar unos segundos en reflejarse).");
+    else if (suscripcionParam === "cancelado") toast("No se completó el pago.", true);
+    history.replaceState(null, "", window.location.pathname);
+  }
+
+  const container = el("div", {}, el("div", { class: "empty" }, "Cargando..."));
+  appEl.appendChild(container);
+  try {
+    const res = await api("/subscription");
+    container.innerHTML = "";
+    if (res.isLegacyAgency) {
+      container.appendChild(el("div", { class: "card empty" }, "LUREQO es tu propia agencia: no paga suscripción. Esta pantalla es la que ven las agencias que usan el CRM como servicio de pago."));
+      return;
+    }
+    renderSubscriptionCards(container, res);
+  } catch (err) {
+    container.innerHTML = "";
+    container.appendChild(el("div", { class: "empty" }, "Error: " + err.message));
+  }
+}
+
+function renderSubscriptionCards(container, res) {
+  // 1) Cómo se calcula la cuota.
+  container.appendChild(
+    el("div", { class: "card", style: "margin-bottom:16px" }, [
+      el("div", { style: "font-weight:600;margin-bottom:8px" }, "Cómo se calcula la cuota"),
+      el("ul", { style: "margin:0 0 10px 18px;padding:0;color:var(--cream-dim)" }, [
+        el("li", {}, `Cada modelo (cuenta de Telegram conectada) cuesta ${fmtCentsEUR(res.priceUnder5Cents)} al mes.`),
+        el("li", {}, `A partir de ${res.discountUnlockedAt} modelos, TODAS pasan a ${fmtCentsEUR(res.priceFrom5Cents)} al mes.`),
+      ]),
+      el("div", { style: "font-size:13px;color:var(--cream-faint)" },
+        "Se paga una sola vez al mes, siempre el día 1. Al activar el plan se cobra solo la parte proporcional hasta el día 1 siguiente. Si añades una modelo a mitad de mes, solo se cobran los días que quedan, y ese importe se suma a la factura del día 1, sin cobros aparte. Si quitas una modelo, los días que sobran se descuentan igual."
+      ),
+    ])
+  );
+
+  // 2) Tus modelos + total.
+  const modelsCard = el("div", { class: "card", style: "margin-bottom:16px" });
+  modelsCard.appendChild(
+    el("div", { style: "display:flex;justify-content:space-between;align-items:baseline;margin-bottom:10px" }, [
+      el("div", { style: "font-weight:600" }, "Tus modelos"),
+      el("div", { style: "color:var(--cream-faint);font-size:13px" }, `${res.modelsCount} modelo${res.modelsCount === 1 ? "" : "s"}`),
+    ])
+  );
+  if (res.models.length === 0) {
+    modelsCard.appendChild(el("div", { class: "empty" }, "Todavía no has conectado ninguna modelo (Configuración → Cuentas de Telegram)."));
+  } else {
+    for (const m of res.models) {
+      modelsCard.appendChild(
+        el("div", { style: "display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--line)" }, [
+          el("div", {}, [
+            el("span", { style: "font-weight:600" }, m.label),
+            el("span", { style: "color:var(--cream-faint);font-size:13px" }, ` · ${m.connected ? "Conectada" : "Desactivada"}`),
+          ]),
+          el("div", {}, fmtCentsEUR(res.unitPriceCents)),
+        ])
+      );
+    }
+    modelsCard.appendChild(
+      el("div", { style: "display:flex;justify-content:space-between;padding:10px 0 0;color:var(--cream-dim)" }, [
+        el("div", {}, `${res.modelsCount} modelo${res.modelsCount === 1 ? "" : "s"} × ${fmtCentsEUR(res.unitPriceCents)}`),
+        el("div", {}, fmtCentsEUR(res.totalCents)),
+      ])
+    );
+    modelsCard.appendChild(
+      el("div", { style: "display:flex;justify-content:space-between;font-weight:700;font-size:17px;padding-top:6px" }, [
+        el("div", {}, "Total al mes"),
+        el("div", {}, fmtCentsEUR(res.totalCents)),
+      ])
+    );
+    if (res.modelsCount < res.discountUnlockedAt) {
+      modelsCard.appendChild(
+        el("div", { style: "font-size:13px;color:var(--cream-faint);margin-top:6px" },
+          `Con ${res.discountUnlockedAt - res.modelsCount} modelo${res.discountUnlockedAt - res.modelsCount === 1 ? "" : "s"} más (${res.discountUnlockedAt} en total) todas pasan a ${fmtCentsEUR(res.priceFrom5Cents)} al mes.`)
+      );
+    }
+  }
+  container.appendChild(modelsCard);
+
+  // 3) Estado del plan + acciones.
+  const statusCard = el("div", { class: "card" });
+  statusCard.appendChild(el("div", { style: "color:var(--cream-faint);font-size:13px" }, "Estado del plan"));
+  statusCard.appendChild(el("div", { style: "font-weight:700;font-size:18px;margin-bottom:10px" }, state.agencyBrandName || "Tu agencia"));
+
+  const status = res.subscriptionStatus;
+  if (status === "active" || status === "trialing" && res.stripeConfigured) {
+    // (caso real "trialing" de Stripe, no la prueba gratis local de abajo)
+  }
+  if (!status) {
+    const daysLeft = daysLeftUntil(res.trialEndsAt);
+    if (daysLeft !== null && daysLeft >= 0) {
+      statusCard.appendChild(el("div", { style: "color:var(--cream-dim)" }, "La prueba termina"));
+      statusCard.appendChild(el("div", { style: "font-weight:600;margin-bottom:12px" }, `${fmtDate(res.trialEndsAt)} · quedan ${daysLeft} día${daysLeft === 1 ? "" : "s"}`));
+    } else {
+      statusCard.appendChild(el("div", { style: "color:#c23b32;font-weight:600;margin-bottom:12px" }, "Tu prueba gratuita ha terminado."));
+    }
+  } else if (status === "active") {
+    statusCard.appendChild(el("div", { style: "color:var(--green-ok, #2e7d32);font-weight:600" }, "✓ Plan activo"));
+    if (res.currentPeriodEnd) {
+      statusCard.appendChild(el("div", { style: "color:var(--cream-faint);font-size:13px;margin-bottom:12px" }, `Próximo cobro: ${fmtDate(res.currentPeriodEnd)}`));
+    }
+  } else if (status === "past_due") {
+    statusCard.appendChild(el("div", { style: "color:#c23b32;font-weight:600;margin-bottom:12px" }, "⚠ No se pudo cobrar el último pago. Actualiza tu método de pago."));
+  } else {
+    statusCard.appendChild(el("div", { style: "color:#c23b32;font-weight:600;margin-bottom:12px" }, "Suscripción no activa."));
+  }
+
+  if (res.blockedReason) {
+    statusCard.appendChild(el("div", { class: "hint", style: "color:#c23b32;margin-bottom:12px" }, res.blockedReason));
+  }
+
+  if (!res.stripeConfigured) {
+    statusCard.appendChild(el("div", { class: "hint" }, "El cobro todavía no está activado en este servidor - habla con soporte."));
+  } else {
+    const btnRow = el("div", { style: "display:flex;gap:10px" });
+    if (status !== "active") {
+      const activateBtn = el("button", { class: "primary" }, "Activar plan ahora");
+      activateBtn.addEventListener("click", async () => {
+        activateBtn.disabled = true;
+        try {
+          const returnUrl = window.location.origin + window.location.pathname;
+          const { url } = await api("/subscription/activate", { method: "POST", body: JSON.stringify({ returnUrl }) });
+          window.location.href = url;
+        } catch (err) {
+          toast(err.message, true);
+          activateBtn.disabled = false;
+        }
+      });
+      btnRow.appendChild(activateBtn);
+    }
+    if (status) {
+      const portalBtn = el("button", { class: "sm" }, "Actualizar");
+      portalBtn.addEventListener("click", async () => {
+        portalBtn.disabled = true;
+        try {
+          const returnUrl = window.location.origin + window.location.pathname;
+          const { url } = await api("/subscription/portal", { method: "POST", body: JSON.stringify({ returnUrl }) });
+          window.location.href = url;
+        } catch (err) {
+          toast(err.message, true);
+          portalBtn.disabled = false;
+        }
+      });
+      btnRow.appendChild(portalBtn);
+    }
+    statusCard.appendChild(btnRow);
+  }
+  container.appendChild(statusCard);
+
+  container.appendChild(
+    el("p", { class: "hint", style: "margin-top:10px" }, "Si vence el plan, la app se pausa y hay 3 días para renovarlo antes del bloqueo total.")
+  );
+}
+
 function comingSoonCard(text) {
   return el("div", { class: "card empty" }, text);
 }
@@ -6705,9 +8403,7 @@ async function renderConfigSection(key) {
   } else if (key === "cuentas-telegram") {
     await renderTelegramAccountsSection();
   } else if (key === "suscripcion") {
-    appEl.appendChild(el("h1", {}, "Suscripción"));
-    appEl.appendChild(el("p", { class: "subtitle" }, `Plan y facturación de ${state.isLegacyAgency ? "LUREQO CRM" : (state.agencyBrandName || "tu agencia")}.`));
-    appEl.appendChild(comingSoonCard("Próximamente: detalle del plan contratado y facturación."));
+    await renderSuscripcionSection();
   } else if (key === "general") {
     await renderGeneralConfigSection();
   }
@@ -6863,8 +8559,133 @@ const DASHBOARD_RANGE_PRESETS = [
   { key: "todo", label: "Todo", days: null },
 ];
 
-async function renderInformesDashboardSection() {
+async function renderInformesDashboardSection(tab) {
+  const current = tab || state.dashboardTab || "actividad";
+  state.dashboardTab = current;
+  appEl.innerHTML = "";
   appEl.appendChild(el("h1", {}, "Dashboard"));
+  const tabs = el("div", { class: "dashboard-tabs" }, [
+    ["actividad", "Actividad"],
+    ["borrados", "Mensajes borrados"],
+  ].map(([key, label]) => el("button", {
+    type: "button",
+    class: "dashboard-tab" + (key === current ? " active" : ""),
+    onclick: () => renderInformesDashboardSection(key),
+  }, label)));
+  appEl.appendChild(tabs);
+  if (current === "borrados") {
+    await renderDeletedMessagesTab();
+  } else {
+    await renderInformesDashboardActivity();
+  }
+}
+
+async function renderDeletedMessagesTab() {
+  appEl.appendChild(el("p", { class: "subtitle" }, "Mensajes que los chatters (o el dueño) han borrado desde el CRM, tal y como se enviaron."));
+  const dState = { range: "7d", q: "", chatter: "", accountId: "" };
+  const searchInput = el("input", { placeholder: "Buscar por palabra...", class: "content-search-input", style: "min-width:220px" });
+  const rangeSelect = el("select", {}, DASHBOARD_RANGE_PRESETS.map((p) => el("option", { value: p.key }, p.label)));
+  const chatterSelect = el("select", {}, el("option", { value: "" }, "Todos los chatters"));
+  const accountSelect = el("select", {}, el("option", { value: "" }, "Todas las creadoras"));
+  appEl.appendChild(el("div", { class: "dashboard-filter-bar" }, [searchInput, rangeSelect, chatterSelect, accountSelect]));
+  const tableWrap = el("div", { class: "work-hours-table-wrap" }, el("div", { class: "empty" }, "Cargando..."));
+  appEl.appendChild(tableWrap);
+
+  function rangeToDates(key) {
+    const preset = DASHBOARD_RANGE_PRESETS.find((p) => p.key === key);
+    if (!preset || preset.days === null) return {};
+    const to = new Date();
+    const from = new Date();
+    if (preset.yesterday) {
+      from.setDate(from.getDate() - 1);
+      to.setDate(to.getDate() - 1);
+    } else {
+      from.setDate(from.getDate() - (preset.days - 1));
+    }
+    return { from: from.toISOString().slice(0, 10), to: to.toISOString().slice(0, 10) };
+  }
+
+  const fmtDT = (v) => {
+    if (!v) return [el("div", {}, "—")];
+    const d = new Date(v);
+    return [
+      el("div", {}, d.toLocaleTimeString("es-ES", { hour: "2-digit", minute: "2-digit" })),
+      el("div", { class: "hint" }, d.toLocaleDateString("es-ES")),
+    ];
+  };
+
+  let optionsLoaded = false;
+  let loadSeq = 0;
+  async function load() {
+    const mySeq = ++loadSeq;
+    tableWrap.innerHTML = "";
+    tableWrap.appendChild(el("div", { class: "empty" }, "Cargando..."));
+    try {
+      const { from, to } = rangeToDates(dState.range);
+      const qs = new URLSearchParams();
+      if (from) qs.set("from", from);
+      if (to) qs.set("to", to);
+      if (dState.q) qs.set("q", dState.q);
+      if (dState.chatter) qs.set("chatter", dState.chatter);
+      if (dState.accountId) qs.set("accountId", dState.accountId);
+      const data = await api(`/informes/deleted-messages?${qs.toString()}`);
+      if (mySeq !== loadSeq) return;
+      if (!optionsLoaded) {
+        for (const c of data.chatters) chatterSelect.appendChild(el("option", { value: c }, c));
+        for (const a of data.accounts) accountSelect.appendChild(el("option", { value: a.id }, a.label));
+        optionsLoaded = true;
+      }
+      tableWrap.innerHTML = "";
+      if (data.rows.length === 0) {
+        tableWrap.appendChild(el("div", { class: "empty" }, "Nadie ha borrado mensajes en este rango. Solo se registran los borrados hechos desde el CRM a partir de ahora."));
+        return;
+      }
+      const table = el("table", { class: "work-hours-table dashboard-feed-table" });
+      table.appendChild(el("thead", {}, el("tr", {}, [
+        el("th", {}, "Borrado por"),
+        el("th", {}, "Enviado por"),
+        el("th", {}, "Creadora"),
+        el("th", {}, "Fan"),
+        el("th", {}, "Mensaje borrado"),
+        el("th", {}, "Enviado"),
+        el("th", {}, "Borrado"),
+      ])));
+      const tbody = el("tbody", {});
+      for (const r of data.rows) {
+        tbody.appendChild(el("tr", {}, [
+          el("td", { style: "font-weight:600" }, r.borradoPor),
+          el("td", {}, r.enviadoPor || "—"),
+          el("td", {}, r.creadora),
+          el("td", {}, r.fan),
+          el("td", { class: "dashboard-deleted-msg", title: r.mensaje }, r.mensaje),
+          el("td", {}, fmtDT(r.enviadoEn)),
+          el("td", {}, fmtDT(r.borradoEn)),
+        ]));
+      }
+      table.appendChild(tbody);
+      tableWrap.appendChild(table);
+      if (data.hasMore) {
+        tableWrap.appendChild(el("div", { class: "hint", style: "margin-top:8px" }, "Hay más borrados de los que se muestran — afina la búsqueda o el rango de fechas."));
+      }
+    } catch (err) {
+      if (mySeq !== loadSeq) return;
+      tableWrap.innerHTML = "";
+      tableWrap.appendChild(el("div", { class: "empty" }, "Error: " + err.message));
+    }
+  }
+  let searchTimer = null;
+  searchInput.addEventListener("input", () => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => { dState.q = searchInput.value.trim(); load(); }, 350);
+  });
+  rangeSelect.value = dState.range;
+  rangeSelect.addEventListener("change", () => { dState.range = rangeSelect.value; load(); });
+  chatterSelect.addEventListener("change", () => { dState.chatter = chatterSelect.value; load(); });
+  accountSelect.addEventListener("change", () => { dState.accountId = accountSelect.value; load(); });
+  await load();
+}
+
+async function renderInformesDashboardActivity() {
   appEl.appendChild(el("p", { class: "subtitle" }, "Todos los mensajes y ventas del equipo, de todas las cuentas, más recientes primero."));
 
   const dState = { range: "7d", q: "", chatter: "", accountId: "" };
@@ -7345,6 +9166,17 @@ async function renderGruposPromocionClasificar(container) {
   adminsCard.appendChild(el("div", { class: "chip-add-row" }, [adminNameInput, addAdminBtn]));
   container.appendChild(adminsCard);
 
+  // ---------- Carpetas propias del CRM (nada que ver con Telegram): igual
+  // que los admins, pero sin precio - solo nombre y nº de grupos ----------
+  const foldersCard = el("div", { class: "card" });
+  foldersCard.appendChild(el("h3", { class: "card-title" }, "Carpetas"));
+  const folderBoxesEl = el("div", { class: "promo-admin-boxes" }, el("div", { class: "empty" }, "Cargando..."));
+  foldersCard.appendChild(folderBoxesEl);
+  const folderNameInput = el("input", { placeholder: "Nombre de la carpeta..." });
+  const addFolderBtn = el("button", {}, "+ Carpeta");
+  foldersCard.appendChild(el("div", { class: "chip-add-row" }, [folderNameInput, addFolderBtn]));
+  container.appendChild(foldersCard);
+
   // ---------- Herramientas: leer grupos, buscar, filtrar ----------
   const toolsCard = el("div", { class: "card" });
   const accountSelect = el("select", {}, el("option", { value: "" }, "Elige una creadora..."));
@@ -7352,8 +9184,9 @@ async function renderGruposPromocionClasificar(container) {
   const readAllBtn = el("button", { class: "sm" }, "Leer todas las creadoras");
   const searchInput = el("input", { placeholder: "Buscar grupo por nombre..." });
   const onlyUnassignedChip = el("div", { class: "filter-chip" }, "Sin admin asignada");
+  const onlyUnassignedFolderChip = el("div", { class: "filter-chip" }, "Sin carpeta asignada");
   toolsCard.appendChild(el("div", { class: "field-inline", style: "margin-bottom:10px" }, [accountSelect, readOneBtn, readAllBtn]));
-  toolsCard.appendChild(el("div", { class: "field-inline" }, [searchInput, onlyUnassignedChip]));
+  toolsCard.appendChild(el("div", { class: "field-inline" }, [searchInput, onlyUnassignedChip, onlyUnassignedFolderChip]));
   const readStatusEl = el("div", { class: "hint" }, "");
   toolsCard.appendChild(readStatusEl);
   container.appendChild(toolsCard);
@@ -7361,17 +9194,22 @@ async function renderGruposPromocionClasificar(container) {
   // ---------- Barra de selección múltiple (aparece al marcar checkboxes) ----------
   const bulkAdminSelect = el("select", {}, el("option", { value: "" }, "Sin admin asignada"));
   const bulkAssignBtn = el("button", { class: "sm primary" }, "Asignar a la selección");
+  const bulkFolderSelect = el("select", {}, el("option", { value: "" }, "Sin carpeta asignada"));
+  const bulkAssignFolderBtn = el("button", { class: "sm primary" }, "Asignar carpeta a la selección");
   const bulkCountEl = el("span", { class: "hint", style: "margin-right:8px" }, "");
   const bulkCancelBtn = el("button", { class: "sm ghost" }, "Cancelar selección");
-  const bulkBar = el("div", { class: "field-inline promo-bulk-bar hidden" }, [bulkCountEl, bulkAdminSelect, bulkAssignBtn, bulkCancelBtn]);
+  const bulkBar = el("div", { class: "field-inline promo-bulk-bar hidden" }, [bulkCountEl, bulkAdminSelect, bulkAssignBtn, bulkFolderSelect, bulkAssignFolderBtn, bulkCancelBtn]);
   container.appendChild(bulkBar);
 
   const tableWrap = el("div", { class: "work-hours-table-wrap" }, el("div", { class: "empty" }, "Cargando..."));
   container.appendChild(tableWrap);
 
   let admins = [];
+  let folders = [];
   let onlyUnassigned = false;
+  let onlyUnassignedFolder = false;
   let adminFilterId = ""; // clic en una caja de admin filtra la tabla por ese admin
+  let folderFilterId = ""; // clic en una caja de carpeta filtra la tabla por esa carpeta
   const selectedIds = new Set(); // checkboxes marcados (selección múltiple)
 
   function updateBulkBar() {
@@ -7463,6 +9301,107 @@ async function renderGruposPromocionClasificar(container) {
       adminBoxesEl.appendChild(el("div", { class: "empty" }, "Error: " + err.message));
     }
   }
+
+  async function loadFolders() {
+    folderBoxesEl.innerHTML = "";
+    const prevBulkValue = bulkFolderSelect.value;
+    try {
+      const { folders: list } = await api("/promo-group-folders");
+      folders = list;
+      bulkFolderSelect.innerHTML = "";
+      bulkFolderSelect.appendChild(el("option", { value: "" }, "Sin carpeta asignada"));
+      for (const f of folders) bulkFolderSelect.appendChild(el("option", { value: f.id }, f.name));
+      bulkFolderSelect.value = prevBulkValue;
+
+      if (folders.length === 0) {
+        folderBoxesEl.appendChild(el("div", { class: "empty" }, "Todavía no hay ninguna carpeta creada."));
+      }
+      for (const f of folders) {
+        const nameEl2 = el("span", { class: "promo-admin-name" }, `${f.name} (${f.groupCount})`);
+        const editBtn = el("button", { class: "promo-admin-icon-btn", title: "Renombrar carpeta" }, "✏️");
+        editBtn.addEventListener("click", async (ev) => {
+          ev.stopPropagation();
+          const nuevo = prompt("Nuevo nombre de la carpeta:", f.name);
+          if (!nuevo || !nuevo.trim() || nuevo.trim() === f.name) return;
+          try {
+            await api(`/promo-group-folders/${f.id}`, { method: "PATCH", body: JSON.stringify({ name: nuevo.trim() }) });
+            toast("Carpeta renombrada");
+            await loadFolders();
+          } catch (err) {
+            toast(err.message, true);
+          }
+        });
+        const removeBtn = el("button", { class: "promo-admin-icon-btn", title: "Eliminar carpeta" }, "×");
+        removeBtn.addEventListener("click", async (ev) => {
+          ev.stopPropagation();
+          if (!confirm(`¿Eliminar la carpeta "${f.name}"? Sus grupos quedarán "Sin carpeta asignada".`)) return;
+          try {
+            await api(`/promo-group-folders/${f.id}`, { method: "DELETE" });
+            toast("Carpeta eliminada");
+            if (folderFilterId === f.id) folderFilterId = "";
+            await loadFolders();
+            await loadTable();
+          } catch (err) {
+            toast(err.message, true);
+          }
+        });
+        const box = el("div", {
+          class: "promo-admin-box" + (folderFilterId === f.id ? " active" : ""),
+          onclick: () => {
+            folderFilterId = folderFilterId === f.id ? "" : f.id;
+            loadFolders();
+            loadTable();
+          },
+        }, [nameEl2, editBtn, removeBtn]);
+        folderBoxesEl.appendChild(box);
+      }
+    } catch (err) {
+      folderBoxesEl.innerHTML = "";
+      folderBoxesEl.appendChild(el("div", { class: "empty" }, "Error: " + err.message));
+    }
+  }
+
+  addFolderBtn.addEventListener("click", async () => {
+    const name = folderNameInput.value.trim();
+    if (!name) return;
+    addFolderBtn.disabled = true;
+    try {
+      await api("/promo-group-folders", { method: "POST", body: JSON.stringify({ name }) });
+      folderNameInput.value = "";
+      toast("Carpeta creada");
+      await loadFolders();
+    } catch (err) {
+      toast(err.message, true);
+    } finally {
+      addFolderBtn.disabled = false;
+    }
+  });
+
+  onlyUnassignedFolderChip.addEventListener("click", () => {
+    onlyUnassignedFolder = !onlyUnassignedFolder;
+    onlyUnassignedFolderChip.classList.toggle("active", onlyUnassignedFolder);
+    loadTable();
+  });
+
+  bulkAssignFolderBtn.addEventListener("click", async () => {
+    if (selectedIds.size === 0) return;
+    bulkAssignFolderBtn.disabled = true;
+    try {
+      await api("/promo-groups/bulk-assign-folder", {
+        method: "POST",
+        body: JSON.stringify({ groupIds: [...selectedIds], promoGroupFolderId: bulkFolderSelect.value || null }),
+      });
+      toast(`Carpeta asignada a ${selectedIds.size} grupo(s)`);
+      selectedIds.clear();
+      updateBulkBar();
+      await loadFolders();
+      await loadTable();
+    } catch (err) {
+      toast(err.message, true);
+    } finally {
+      bulkAssignFolderBtn.disabled = false;
+    }
+  });
 
   addAdminBtn.addEventListener("click", async () => {
     const name = adminNameInput.value.trim();
@@ -7561,8 +9500,11 @@ async function renderGruposPromocionClasificar(container) {
       const qs = new URLSearchParams();
       if (searchInput.value.trim()) qs.set("search", searchInput.value.trim());
       if (onlyUnassigned) qs.set("onlyUnassigned", "true");
-      const { groups } = await api(`/promo-groups?${qs.toString()}`);
-      const filtered = adminFilterId ? groups.filter((g) => g.promoAdminId === adminFilterId) : groups;
+      if (onlyUnassignedFolder) qs.set("onlyUnassignedFolder", "true");
+      const { groups: rawGroups } = await api(`/promo-groups?${qs.toString()}`);
+      let filtered = adminFilterId ? rawGroups.filter((g) => g.promoAdminId === adminFilterId) : rawGroups;
+      if (folderFilterId) filtered = filtered.filter((g) => g.promoGroupFolderId === folderFilterId);
+      const groups = rawGroups;
 
       // Los grupos que ya no aparecen en este filtrado (búsqueda cambiada,
       // etc.) se sueltan de la selección para no "asignar a la selección"
@@ -7593,13 +9535,24 @@ async function renderGruposPromocionClasificar(container) {
         el("th", {}, "Tipo"),
         el("th", {}, "Miembros"),
         el("th", {}, "Modelos dentro"),
-        el("th", { title: "Fans nuevos atribuidos a este grupo (histórico)" }, "Hablaron"),
+        el("th", { title: "Fans nuevos atribuidos a este grupo (histórico). Si el grupo tiene varias modelos dentro, se desglosa por modelo." }, "Hablaron"),
         el("th", { title: "De esos fans, cuántos han comprado alguna vez" }, "Compraron"),
         el("th", {}, "Conv."),
         el("th", { title: "Nº de ventas de esos fans (histórico)" }, "Ventas"),
         el("th", {}, "Admin"),
+        el("th", {}, "Carpeta"),
       ])));
       const tbody = el("tbody", {});
+      // Cuando el grupo tiene más de una modelo dentro, se desglosa el stat
+      // pedido ("con esta modelo hablaron X, con esta otra Y") en vez de
+      // mostrar solo el total combinado; con una sola modelo (o ninguna) se
+      // deja el total tal cual, igual que antes.
+      function statCell(g, fmt) {
+        if (!g.porModelo || g.porModelo.length <= 1) return el("td", {}, fmt(g));
+        return el("td", {}, el("div", { class: "promo-stat-breakdown" },
+          g.porModelo.map((m) => el("div", {}, `${m.label}: ${fmt(m)}`))
+        ));
+      }
       for (const g of filtered) {
         const rowCb = el("input", { type: "checkbox", checked: selectedIds.has(g.id) ? "true" : null });
         rowCb.addEventListener("change", () => {
@@ -7622,17 +9575,34 @@ async function renderGruposPromocionClasificar(container) {
             adminSelect.disabled = false;
           }
         });
+        const folderSelect = el("select", {}, [
+          el("option", { value: "" }, "Sin carpeta asignada"),
+          ...folders.map((f) => el("option", { value: f.id, selected: f.id === g.promoGroupFolderId ? "true" : null }, f.name)),
+        ]);
+        folderSelect.addEventListener("change", async () => {
+          folderSelect.disabled = true;
+          try {
+            await api(`/promo-groups/${g.id}`, { method: "PATCH", body: JSON.stringify({ promoGroupFolderId: folderSelect.value || null }) });
+            toast("Guardado");
+            await loadFolders();
+          } catch (err) {
+            toast(err.message, true);
+          } finally {
+            folderSelect.disabled = false;
+          }
+        });
         tbody.appendChild(el("tr", {}, [
           el("td", {}, rowCb),
           el("td", { style: "font-weight:600" }, g.title),
           el("td", {}, g.isChannel ? "Canal" : "Grupo"),
           el("td", {}, String(g.memberCount)),
           el("td", {}, g.accounts.map((a) => a.label).join(", ") || "—"),
-          el("td", {}, String(g.hablaron)),
-          el("td", {}, String(g.compraron)),
-          el("td", {}, g.conversion === null ? "-" : `${g.conversion.toFixed(1)}%`),
-          el("td", {}, String(g.ventas)),
+          statCell(g, (x) => String(x.hablaron)),
+          statCell(g, (x) => String(x.compraron)),
+          statCell(g, (x) => (x.conversion === null ? "-" : `${x.conversion.toFixed(1)}%`)),
+          statCell(g, (x) => String(x.ventas)),
           el("td", {}, adminSelect),
+          el("td", {}, folderSelect),
         ]));
       }
       table.appendChild(tbody);
@@ -7645,6 +9615,7 @@ async function renderGruposPromocionClasificar(container) {
 
   await loadAccounts();
   await loadAdmins();
+  await loadFolders();
   await loadTable();
 }
 
@@ -8054,7 +10025,7 @@ async function renderHorasTrabajadasSection() {
         tbody.appendChild(el("tr", {}, [
           el("td", { style: "font-weight:600" }, r.workerName),
           el("td", { style: "color:var(--gold-400)" }, r.hoursWorked),
-          el("td", { style: "color:#e2c98b" }, r.idleWithFans),
+          el("td", { style: "color:#8a6a28" }, r.idleWithFans),
           el("td", {}, r.idleNoFans),
           el("td", {}, String(r.sessions)),
           el("td", {}, String(r.disconnections)),
@@ -9171,7 +11142,7 @@ async function renderModelosSection() {
   function renderList() {
     listEl.innerHTML = "";
     for (const acc of accounts) {
-      const dotClass = !acc.reenviadorEnabled ? "off" : acc.health === "PEER_FLOOD_PAUSED" ? "paused" : "on";
+      const dotClass = statusDotClass(acc);
       listEl.appendChild(el("div", {
         class: "modelos-list-item" + (acc.id === modelosSelectedId ? " active" : ""),
         onclick: () => {
@@ -9186,7 +11157,7 @@ async function renderModelosSection() {
           el("div", { class: "modelos-list-item-name" }, acc.label),
           el("div", { class: "modelos-list-item-phone" }, acc.phoneNumber),
         ]),
-        el("div", { class: "status-dot " + dotClass }),
+        el("div", { class: "status-dot " + dotClass, title: statusDotTitle(acc) }),
       ]));
     }
   }
@@ -9779,44 +11750,86 @@ function renderExcludedFoldersCard(acc) {
   const card = el("div", { class: "card" });
   card.appendChild(el("h3", {}, "Excluir carpeta de Telegram"));
   card.appendChild(el("p", { class: "hint" },
-    "Escribe el nombre exacto de una carpeta de Telegram (ej. \"Admins\" o \"Administradores\") para sacar a todos sus chats de la lista de Mensajes — útil para equipo interno que no son fans. Puedes excluir más de una, una por una."));
+    "Marca las carpetas de Telegram de esta cuenta que quieras sacar de la lista de Mensajes del CRM (p.ej. una carpeta de equipo interno que no son fans). Los chatters/trabajadores no verán ningún chat de las carpetas marcadas."));
 
-  const chipsEl = el("div", { class: "chip-list" });
-  card.appendChild(chipsEl);
-  const input = el("input", { placeholder: "Nombre de la carpeta..." });
-  const addBtn = el("button", {}, "Excluir");
-  card.appendChild(el("div", { class: "chip-add-row" }, [input, addBtn]));
+  const listEl = el("div", {});
+  card.appendChild(listEl);
+  const statusEl = el("div", { class: "hint" }, "Cargando carpetas de Telegram...");
+  listEl.appendChild(statusEl);
 
-  let folders = [];
-  function renderChips() {
-    chipsEl.innerHTML = "";
-    for (const f of folders) {
-      const removeBtn = el("button", { class: "chip-remove", title: "Quitar" }, "×");
-      removeBtn.addEventListener("click", () => save(folders.filter((x) => x !== f)));
-      chipsEl.appendChild(el("div", { class: "chip" }, [f, removeBtn]));
-    }
+  let excluded = [];
+  let realFolders = null; // null = aún no sabemos si la lista en vivo cargó bien
+
+  function isExcluded(title) {
+    return excluded.some((x) => x.toLowerCase() === title.toLowerCase());
   }
+
   async function save(next) {
     try {
       await api(`/accounts/${acc.id}/excluded-folders`, { method: "PUT", body: JSON.stringify({ folders: next }) });
-      folders = next;
-      renderChips();
+      excluded = next;
       toast("Guardado");
     } catch (err) {
       toast(err.message, true);
+      render(); // revertir el checkbox visualmente si falló el guardado
     }
   }
-  addBtn.addEventListener("click", () => {
-    const value = input.value.trim();
-    if (!value || folders.includes(value)) return;
-    save([...folders, value]);
-    input.value = "";
-  });
 
-  api(`/accounts/${acc.id}/excluded-folders`).then((res) => {
-    folders = res.folders;
-    renderChips();
-  }).catch(() => {});
+  function toggle(title, checked) {
+    if (checked) {
+      if (!isExcluded(title)) save([...excluded, title]);
+    } else {
+      save(excluded.filter((x) => x.toLowerCase() !== title.toLowerCase()));
+    }
+  }
+
+  function render() {
+    listEl.innerHTML = "";
+    if (realFolders === null) {
+      listEl.appendChild(el("div", { class: "hint" }, "Cargando carpetas de Telegram..."));
+      return;
+    }
+    if (realFolders.length === 0) {
+      listEl.appendChild(el("div", { class: "hint" }, "Esta cuenta no tiene carpetas configuradas en Telegram."));
+    }
+    for (const f of realFolders) {
+      const row = el("label", { class: "folder-checkbox-row" }, [
+        el("input", { type: "checkbox", checked: isExcluded(f.title) ? "checked" : undefined }),
+        el("span", {}, `${f.title} (${f.chatCount} chat${f.chatCount === 1 ? "" : "s"})`),
+      ]);
+      const checkboxInput = row.querySelector("input");
+      checkboxInput.checked = isExcluded(f.title);
+      checkboxInput.addEventListener("change", () => toggle(f.title, checkboxInput.checked));
+      listEl.appendChild(row);
+    }
+    // Por si hay nombres guardados que ya no existen como carpeta real en
+    // Telegram (se borró/renombró la carpeta allí) - se muestran aparte
+    // para poder quitarlos, en vez de desaparecer en silencio.
+    const knownTitles = new Set(realFolders.map((f) => f.title.toLowerCase()));
+    const orphaned = excluded.filter((x) => !knownTitles.has(x.toLowerCase()));
+    if (orphaned.length > 0) {
+      listEl.appendChild(el("div", { class: "hint", style: "margin-top:10px" }, "Excluidas antes, ya no existen en Telegram:"));
+      const chipsEl = el("div", { class: "chip-list" });
+      for (const title of orphaned) {
+        const removeBtn = el("button", { class: "chip-remove", title: "Quitar" }, "×");
+        removeBtn.addEventListener("click", () => save(excluded.filter((x) => x !== title)));
+        chipsEl.appendChild(el("div", { class: "chip" }, [title, removeBtn]));
+      }
+      listEl.appendChild(chipsEl);
+    }
+  }
+
+  Promise.all([
+    api(`/accounts/${acc.id}/excluded-folders`),
+    api(`/accounts/${acc.id}/telegram-folders`),
+  ]).then(([excludedRes, foldersRes]) => {
+    excluded = excludedRes.folders || [];
+    realFolders = foldersRes.folders || [];
+    render();
+  }).catch((err) => {
+    listEl.innerHTML = "";
+    listEl.appendChild(el("div", { class: "hint" }, `No se pudieron cargar las carpetas de Telegram de esta cuenta (${err.message}). Prueba a recargar la página.`));
+  });
 
   return card;
 }
@@ -11417,18 +13430,23 @@ async function fetchWorkerSession() {
  */
 function applyBranding() {
   const isLegacy = state.isLegacyAgency;
-  const brandName = isLegacy ? "LUREQO CRM" : (state.agencyBrandName || "Panel");
+  const brandName = isLegacy ? "LUREQO" : (state.agencyBrandName || "Panel");
 
-  document.title = isLegacy ? "LUREQO CRM — Panel" : `${brandName} — Panel`;
+  document.title = isLegacy ? "LUREQO — Panel" : `${brandName} — Panel`;
 
   const favicon = document.getElementById("faviconLink");
-  if (favicon) favicon.href = "data:,";
+  if (favicon) favicon.href = isLegacy ? "/assets/logo.png" : "data:,";
 
   const topbarLogo = document.getElementById("mobileTopbarLogo");
   const topbarTitle = document.getElementById("mobileTopbarTitle");
   if (topbarLogo) {
-    topbarLogo.removeAttribute("src");
-    topbarLogo.classList.add("hidden");
+    if (isLegacy) {
+      topbarLogo.src = "/assets/logo.png";
+      topbarLogo.classList.remove("hidden");
+    } else {
+      topbarLogo.removeAttribute("src");
+      topbarLogo.classList.add("hidden");
+    }
   }
   if (topbarTitle) topbarTitle.textContent = brandName;
 
@@ -11450,22 +13468,24 @@ function applyBranding() {
     }
   }
   if (brandLogo) {
-    brandLogo.removeAttribute("src");
-    brandLogo.alt = "";
-    brandLogo.classList.add("hidden");
+    if (isLegacy) {
+      brandLogo.src = "/assets/logo.png";
+      brandLogo.alt = "LUREQO";
+      brandLogo.classList.remove("hidden");
+    } else {
+      brandLogo.removeAttribute("src");
+      brandLogo.alt = "";
+      brandLogo.classList.add("hidden");
+    }
   }
   if (brandText) {
     brandText.innerHTML = "";
     if (isLegacy) {
-      brandBlock.insertBefore(
-        el("div", { class: "brand-initial" }, "L"),
-        brandBlock.firstChild
-      );
       brandText.appendChild(el("div", { class: "brand-title" }, "LUREQO"));
-      brandText.appendChild(el("div", { class: "brand-title" }, "CRM"));
+      brandText.appendChild(el("div", { class: "brand-title" }, "MANAGEMENT"));
     } else {
       // Nombre de la agencia en 1-2 líneas (partido por palabras, como el
-      // de LUREQO CRM) para que quepa igual en la barra lateral.
+      // de LUXE) para que quepa igual en la barra lateral.
       const words = brandName.split(" ").filter(Boolean);
       if (words.length > 1) {
         const mid = Math.ceil(words.length / 2);
@@ -11638,8 +13658,8 @@ async function workerLogout() {
 
 async function renderWorkerRestrictedShell() {
   document.body.classList.remove("worker-login-mode");
-  if (sidebarEl) sidebarEl.classList.remove("sidebar-collapsed");
   state.currentView = "mensajes";
+  startGlobalMessageNotifications();
 
   const permittedAccountIds = [...new Set(
     state.workerPermissions.filter((p) => p.section === "mensajes").map((p) => p.accountId)
@@ -11676,13 +13696,19 @@ async function renderWorkerRestrictedShell() {
   // viendo el histórico completo con filtros desde la vista normal de Pagos
   // (renderPagosShell), a la que solo se llega con la barra lateral completa.
   function renderWorkerNav() {
+    // Igual que en el panel del dueño/jefe (renderSidenav): dentro de
+    // "Mensajes" (y, para un Team líder, dentro de SFS → Chat) la barra se
+    // minimiza a solo iconos, con el nombre como tooltip al pasar el ratón.
+    const collapsed = state.currentView === "mensajes" || (state.currentView === "sfs" && workerSfsSubTab === "chat");
+    if (sidebarEl) sidebarEl.classList.toggle("sidebar-collapsed", collapsed);
     sidenavEl.innerHTML = "";
     // "Solo lectura" (Equipo → Permisos): aviso fijo arriba del todo para que
     // quede claro por qué los botones de enviar/guardar no funcionan - el
     // bloqueo de verdad está en el servidor, esto es solo para que no
     // parezca que el panel está roto.
     if (state.isReadOnlyWorker) {
-      sidenavEl.appendChild(el("div", { class: "nav-item read-only-banner" }, [
+      const tooltipAttrs = collapsed ? { "data-tooltip": "Solo lectura" } : {};
+      sidenavEl.appendChild(el("div", { class: "nav-item read-only-banner", ...tooltipAttrs }, [
         el("span", { class: "nav-icon" }, "👁️"),
         el("span", { class: "nav-label" }, "Solo lectura"),
       ]));
@@ -11690,6 +13716,7 @@ async function renderWorkerRestrictedShell() {
     sidenavEl.appendChild(el("a", {
       class: "nav-item" + (state.currentView === "mensajes" ? " active" : ""),
       href: "#",
+      ...(collapsed ? { "data-tooltip": "Mensajes" } : {}),
       onclick: (e) => { e.preventDefault(); closeMobileNav(); showWorkerMensajesView(); },
     }, [
       el("span", { class: "nav-icon" }, "💬"),
@@ -11698,6 +13725,7 @@ async function renderWorkerRestrictedShell() {
     sidenavEl.appendChild(el("a", {
       class: "nav-item",
       href: "#",
+      ...(collapsed ? { "data-tooltip": "Mensajes Pro" } : {}),
       onclick: (e) => { e.preventDefault(); closeMobileNav(); window.open("/mensajes-pro", "_blank"); },
     }, [
       el("span", { class: "nav-icon" }, "⭐"),
@@ -11706,6 +13734,7 @@ async function renderWorkerRestrictedShell() {
     sidenavEl.appendChild(el("a", {
       class: "nav-item" + (state.currentView === "pagos" ? " active" : ""),
       href: "#",
+      ...(collapsed ? { "data-tooltip": "Pagos" } : {}),
       onclick: (e) => { e.preventDefault(); closeMobileNav(); showWorkerPagosView(); },
     }, [
       el("span", { class: "nav-icon" }, "💳"),
@@ -11714,6 +13743,7 @@ async function renderWorkerRestrictedShell() {
     sidenavEl.appendChild(el("a", {
       class: "nav-item" + (state.currentView === "nominas" ? " active" : ""),
       href: "#",
+      ...(collapsed ? { "data-tooltip": "Nóminas" } : {}),
       onclick: (e) => { e.preventDefault(); closeMobileNav(); showWorkerNominasView(); },
     }, [
       el("span", { class: "nav-icon" }, "🧾"),
@@ -11722,6 +13752,7 @@ async function renderWorkerRestrictedShell() {
     sidenavEl.appendChild(el("a", {
       class: "nav-item" + (state.currentView === "rendimiento" ? " active" : ""),
       href: "#",
+      ...(collapsed ? { "data-tooltip": "Mi rendimiento" } : {}),
       onclick: (e) => { e.preventDefault(); closeMobileNav(); showWorkerPerformanceView(); },
     }, [
       el("span", { class: "nav-icon" }, "📈"),
@@ -11731,6 +13762,7 @@ async function renderWorkerRestrictedShell() {
       sidenavEl.appendChild(el("a", {
         class: "nav-item" + (state.currentView === "sfs" ? " active" : ""),
         href: "#",
+        ...(collapsed ? { "data-tooltip": "SFS" } : {}),
         onclick: (e) => { e.preventDefault(); closeMobileNav(); showWorkerSfsView(); },
       }, [
         el("span", { class: "nav-icon" }, "🔁"),
@@ -11739,6 +13771,7 @@ async function renderWorkerRestrictedShell() {
       sidenavEl.appendChild(el("a", {
         class: "nav-item" + (state.currentView === "programar-posts" ? " active" : ""),
         href: "#",
+        ...(collapsed ? { "data-tooltip": "Programar posts" } : {}),
         onclick: (e) => { e.preventDefault(); closeMobileNav(); showWorkerProgramarPostsView(); },
       }, [
         el("span", { class: "nav-icon" }, "🗓️"),
@@ -11746,8 +13779,20 @@ async function renderWorkerRestrictedShell() {
       ]));
     }
     sidenavEl.appendChild(el("a", {
+      class: "nav-item" + (state.currentView === "ayuda" ? " active" : ""),
+      href: "#",
+      ...(collapsed ? { "data-tooltip": "Ayuda" } : {}),
+      onclick: (e) => { e.preventDefault(); closeMobileNav(); showWorkerAyudaView(); },
+    }, [
+      el("span", { class: "nav-icon" }, "❓"),
+      el("span", { class: "nav-label" }, "Ayuda"),
+    ]));
+    navRerender = renderWorkerNav;
+    sidenavEl.appendChild(buildThemeNavItem(collapsed));
+    sidenavEl.appendChild(el("a", {
       class: "nav-item worker-logout-item",
       href: "#",
+      ...(collapsed ? { "data-tooltip": "Cerrar sesión" } : {}),
       onclick: (e) => { e.preventDefault(); workerLogout(); },
     }, [
       el("span", { class: "nav-icon" }, "🚪"),
@@ -11789,6 +13834,14 @@ async function renderWorkerRestrictedShell() {
     accountListEl.innerHTML = "";
     appEl.innerHTML = "";
     renderWorkerPagosView(appEl);
+  }
+
+  function showWorkerAyudaView() {
+    state.currentView = "ayuda";
+    renderWorkerNav();
+    accountListEl.innerHTML = "";
+    appEl.innerHTML = "";
+    renderAyudaView(appEl);
   }
 
   function showWorkerNominasView() {
@@ -11879,6 +13932,7 @@ async function renderWorkerRestrictedShell() {
   function setWorkerSfsSubTab(tab) {
     if (workerSfsSubTab === tab) return;
     workerSfsSubTab = tab;
+    renderWorkerNav(); // el chat colapsa la barra lateral, el grupo no
     renderWorkerSfsAccountList();
     renderWorkerSfsSection();
   }
@@ -11952,7 +14006,7 @@ async function ownerLogout() {
  * Portal de login. Mismo formulario y mismo backend (POST
  * /api/auth/unified-login) para los dos casos - la única diferencia es
  * cosmética: branded=false (ver /login2 en init()) quita el logo, el
- * nombre "LUREQO CRM" y el título/favicon de la pestaña, para que
+ * nombre "LUREQO" y el título/favicon de la pestaña, para que
  * una agencia que no sea la tuya pueda compartir un acceso que no lleve
  * ninguna marca de LUXE. Las credenciales y el backend son EXACTAMENTE los
  * mismos en los dos - /login2 no es un login "más débil", solo uno sin
@@ -11982,8 +14036,8 @@ function renderOwnerLoginScreen(options = {}) {
   const submitBtn = el("button", { class: "primary", type: "submit" }, "Entrar");
 
   const form = el("form", { class: "owner-login-card" }, [
-    branded ? el("div", { class: "owner-login-logo-ring" }, "L") : null,
-    el("h1", {}, branded ? "LUREQO CRM" : "Iniciar sesión"),
+    branded ? el("div", { class: "owner-login-logo-ring" }, el("img", { src: "/assets/logo.png", class: "owner-login-logo", alt: "LUREQO" })) : null,
+    el("h1", {}, branded ? "LUREQO" : "Iniciar sesión"),
     el("p", { class: "hint" }, "Introduce tus credenciales para entrar al panel. Si eres del equipo, usa el email y la contraseña que te haya dado tu agencia."),
     el("div", { class: "field" }, [el("label", {}, "Usuario o email"), userInput]),
     el("div", { class: "field" }, [el("label", {}, "Contraseña"), passInput]),
@@ -12091,16 +14145,52 @@ async function renderMensajesProShell() {
   // Insignias de "sin leer" por pestaña, igual que en el nav normal: se
   // pide una vez por cuenta y se reparte entre la pestaña de esa creadora y
   // el total de "Todas", sin bloquear el pintado inicial de la barra.
+  // Antes pedía /accounts/:id/unread-summary UNA VEZ POR CUENTA en paralelo,
+  // cada vez que llegaba un mensaje de cualquier creadora o se cambiaba de
+  // pestaña - con varias cuentas abiertas eso disparaba una ráfaga de
+  // peticiones a la vez, que competía por el límite de conexiones del
+  // navegador con las dos conexiones en vivo que Mensajes Pro ya mantiene
+  // siempre abiertas (live-stream + la de la pestaña activa) y dejaba el
+  // panel "colgado" justo al entrar a una conversación. Ahora es UNA sola
+  // petición para todas las cuentas (ver /api/accounts/unread-summary-bulk),
+  // con un pequeño debounce para no repetirla sin necesidad si llegan varios
+  // mensajes seguidos.
+  let unreadBadgesRefreshTimer = null;
   function refreshProTabUnreadBadges() {
-    Promise.all(accounts.map((a) => api(`/accounts/${a.id}/unread-summary`).then((res) => ({ id: a.id, unread: res.totalUnread || 0 })).catch(() => ({ id: a.id, unread: 0 }))))
-      .then((results) => {
-        const byAccount = new Map(results.map((r) => [r.id, r.unread]));
-        const total = results.reduce((sum, r) => sum + r.unread, 0);
-        for (const tab of mensajesProState.openTabs) {
-          tab.unread = tab.key === "all" ? total : (byAccount.get(tab.key) || 0);
-        }
-        renderProTabBar();
-      });
+    clearTimeout(unreadBadgesRefreshTimer);
+    unreadBadgesRefreshTimer = setTimeout(() => {
+      api(`/accounts/unread-summary-bulk`)
+        .then((res) => {
+          const byAccount = res.byAccount || {};
+          const total = Object.values(byAccount).reduce((sum, n) => sum + n, 0);
+          for (const tab of mensajesProState.openTabs) {
+            tab.unread = tab.key === "all" ? total : (byAccount[tab.key] || 0);
+          }
+          renderProTabBar();
+        })
+        .catch(() => { /* las insignias son solo un extra, que no tumben nada si falla */ });
+    }, 1200); // margen mayor: con mensajes frecuentes de varias creadoras a la vez, no hace falta repintar la barra tan seguido
+  }
+
+  // Notificaciones de escritorio de TODAS las creadoras a la vez (ver
+  // maybeNotifyProNewMessage y /api/accounts/live-stream en el backend):
+  // una sola conexión en vivo, aparte de la del tab bar (esa solo cubre la
+  // pestaña activa), que vive mientras esté abierta esta pestaña/ventana de
+  // Mensajes Pro - no hace falta cerrarla a mano al cambiar de pestaña
+  // interna (a diferencia de closeMensajesLiveConnection), porque no
+  // depende de qué creadora se esté mirando ahora mismo.
+  let liveNotifyEs = null;
+  function startLiveNotifications() {
+    if (liveNotifyEs) { try { liveNotifyEs.close(); } catch { /* ya cerrado */ } }
+    liveNotifyEs = new EventSource(`${API_BASE}/accounts/live-stream`);
+    liveNotifyEs.onmessage = (ev) => {
+      let payload;
+      try { payload = JSON.parse(ev.data); } catch { return; }
+      if (payload.type !== "message" || payload.message.out) return;
+      const acc = accounts.find((a) => a.id === payload.accountId);
+      if (payload.notify !== false) maybeNotifyProNewMessage(acc ? acc.label : "LUXE", payload.chatTitle, payload.accountId, payload.chatId, payload.message.text, payload.message.id);
+      refreshProTabUnreadBadges();
+    };
   }
 
   let addMenuEl = null;
@@ -12180,6 +14270,7 @@ async function renderMensajesProShell() {
 
   renderProTabBar();
   refreshProTabUnreadBadges();
+  startLiveNotifications();
 
   // "Abrir en ventana nueva" (menú ⋮ de una conversación) trae aquí un hash
   // #cuenta:chat:titulo - si viene, se abre esa creadora y ese chat directos
@@ -12239,7 +14330,11 @@ async function renderMensajesProAllView(accounts, container, onOpenChat) {
   wrap.appendChild(listEl);
   container.appendChild(wrap);
 
-  let allRows = [];
+  // Si ya se entró antes a "Todas" en esta misma sesión de navegador, se
+  // pinta YA con lo último que se sabía (en vez de "Cargando...") mientras
+  // la carga de verdad sigue su curso por debajo - draw() está definido más
+  // abajo, así que esto solo deja la lista lista para cuando se llame.
+  let allRows = proAllRowsCache || [];
 
   // Tope de tiempo POR CUENTA, mucho mas corto que el de /dialogs en el
   // servidor (120s, pensado para la vista normal de una sola creadora tras
@@ -12254,41 +14349,29 @@ async function renderMensajesProAllView(accounts, container, onOpenChat) {
   // bloquear a las demas.
   const PER_ACCOUNT_TIMEOUT_MS = 12_000;
 
-  async function loadAllRows(force) {
-    const results = await Promise.all(
-      accounts.map(async (acc) => {
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), PER_ACCOUNT_TIMEOUT_MS);
-        try {
-          const { dialogs } = await api(`/accounts/${acc.id}/dialogs${force ? "?force=1" : ""}`, { signal: controller.signal });
-          // /dialogs ya viene filtrado del backend a chats con fans + grupos
-          // restringidos de verdad (nada de spam) - se listan todos, igual
-          // que en la vista normal de esa creadora.
-          return dialogs.map((d) => ({ ...d, accountId: acc.id, accountLabel: acc.label }));
-        } catch {
-          return []; // una cuenta caida/lenta/desconectada no debe tirar abajo el resto de "Todas"
-        } finally {
-          clearTimeout(timer);
-        }
-      })
-    );
-    allRows = results.flat().sort((a, b) => new Date(b.lastMessageDate || 0) - new Date(a.lastMessageDate || 0));
+  // Antes se repintaba la lista ENTERA (listEl.innerHTML = "" + reconstruir
+  // todos los <div>) cada vez que se llamaba a draw() - incluido el refresco
+  // silencioso de cada 30s de mas abajo, que la mayoria de las veces no trae
+  // ningun cambio real. Con varias decenas de chats eso es un parpadeo
+  // notable y perdida de scroll cada 30s aunque no haya pasado nada, que es
+  // justo lo que se nota como "va menos fluido que Infloww". Ahora se
+  // calcula una firma barata de lo que tocaria pintar (que chats, en que
+  // orden, con que no-leidos/fecha) y si es IGUAL a la ultima vez, no se
+  // toca el DOM para nada - el refresco de 30s solo repinta de verdad
+  // cuando algo cambio de verdad.
+  let lastDrawnSignature = null;
+  function rowsSignature(rows) {
+    return rows.map((d) => `${d.accountId}:${d.chatId}:${d.unreadCount}:${d.lastMessageDate}:${d.lastMessageOut ? 1 : 0}`).join("|");
   }
-
-  try {
-    await loadAllRows(false);
-  } catch (err) {
-    listEl.innerHTML = "";
-    listEl.appendChild(el("div", { class: "empty" }, "No se pudo cargar la bandeja: " + err.message));
-    return;
-  }
-
   function draw(filterText) {
-    listEl.innerHTML = "";
     const s = (filterText || "").toLowerCase();
     const rows = s
       ? allRows.filter((d) => d.title.toLowerCase().includes(s) || d.accountLabel.toLowerCase().includes(s) || (d.lastMessage || "").toLowerCase().includes(s))
       : allRows;
+    const signature = s + "\u0001" + rowsSignature(rows);
+    if (signature === lastDrawnSignature) return;
+    lastDrawnSignature = signature;
+    listEl.innerHTML = "";
     if (rows.length === 0) {
       listEl.appendChild(el("div", { class: "empty" }, "Sin conversaciones."));
       return;
@@ -12321,7 +14404,47 @@ async function renderMensajesProAllView(accounts, container, onOpenChat) {
     clearTimeout(searchTimer);
     searchTimer = setTimeout(() => draw(searchInput.value), 250);
   });
+  // Si había caché, esto pinta la bandeja entera AL INSTANTE (nada de
+  // "Cargando...") mientras la carga de verdad de abajo sigue su curso en
+  // segundo plano - antes "Todas" siempre arrancaba en blanco, aunque se
+  // acabara de ver hace un momento.
   draw("");
+
+  async function loadAllRows(force) {
+    const results = await Promise.all(
+      accounts.map(async (acc) => {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), PER_ACCOUNT_TIMEOUT_MS);
+        try {
+          const { dialogs } = await api(`/accounts/${acc.id}/dialogs${force ? "?force=1" : ""}`, { signal: controller.signal });
+          // /dialogs ya viene filtrado del backend a chats con fans + grupos
+          // restringidos de verdad (nada de spam) - se listan todos, igual
+          // que en la vista normal de esa creadora.
+          return dialogs.map((d) => ({ ...d, accountId: acc.id, accountLabel: acc.label }));
+        } catch {
+          return []; // una cuenta caida/lenta/desconectada no debe tirar abajo el resto de "Todas"
+        } finally {
+          clearTimeout(timer);
+        }
+      })
+    );
+    allRows = results.flat().sort((a, b) => new Date(b.lastMessageDate || 0) - new Date(a.lastMessageDate || 0));
+    proAllRowsCache = allRows;
+  }
+
+  try {
+    await loadAllRows(false);
+    draw(searchInput.value);
+  } catch (err) {
+    if (allRows.length === 0) {
+      listEl.innerHTML = "";
+      listEl.appendChild(el("div", { class: "empty" }, "No se pudo cargar la bandeja: " + err.message));
+      return;
+    }
+    // Ya había algo pintado desde caché - se deja eso visible en vez de
+    // tapar una bandeja que de hecho sirve con un mensaje de error.
+    toast("No se pudo actualizar la bandeja: " + err.message, true);
+  }
 
   reloadBtn.addEventListener("click", async () => {
     reloadBtn.disabled = true;
@@ -12426,6 +14549,7 @@ async function init() {
   }
 
   renderSidenav();
+  startGlobalMessageNotifications();
   try {
     const { accounts } = await api("/accounts");
     state.accounts = accounts;

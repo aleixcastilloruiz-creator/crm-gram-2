@@ -1,5 +1,27 @@
 import { TelegramClient, Api } from "telegram";
 
+// Sin esto, un GetDialogFilters que se queda colgado (conexión zombi, ver
+// connectionPool.ts) dejaba SIN NINGÚN LÍMITE DE TIEMPO toda carga de
+// Mensajes/Mensajes Pro que pasara por aquí (resolveMessageFolderChatIds y
+// getChatFoldersMap en messages.ts se llaman en CADA GET /dialogs, para
+// TODAS las cuentas, antes incluso de llegar al withTimeout de 2 min que ya
+// protege la lista de chats en sí) - el panel se quedaba "Cargando..." para
+// siempre, sin ningún error, aunque se reconectara la cuenta entera desde
+// cero (la conexión zombi vieja seguía ahí hasta el siguiente barrido
+// periódico, ver ZOMBIE_SWEEP_INTERVAL_MS). Esto se vio reportado como que
+// a algunas creadoras concretas "no le cargan los chats nunca".
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`Telegram está tardando demasiado en responder (${label}).`));
+    }, ms);
+    promise.then(
+      (v) => { clearTimeout(timer); resolve(v); },
+      (e) => { clearTimeout(timer); reject(e); }
+    );
+  });
+}
+
 export interface TelegramFolderSummary {
   id: number;
   title: string;
@@ -13,7 +35,7 @@ export interface TelegramFolderSummary {
  * con su conteo de chats.
  */
 export async function listAccountFolders(client: TelegramClient): Promise<TelegramFolderSummary[]> {
-  const result = await client.invoke(new Api.messages.GetDialogFilters());
+  const result = await withTimeout(client.invoke(new Api.messages.GetDialogFilters()), 30_000, "listando las carpetas");
   const filters = "filters" in result ? result.filters : (result as any);
 
   const summaries: TelegramFolderSummary[] = [];

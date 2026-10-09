@@ -9,6 +9,7 @@ import { apiId, apiHash } from "../telegram/client";
 import { prisma } from "../utils/prisma";
 import { encryptSecret } from "../utils/crypto";
 import { invalidateAccountClient } from "../telegram/connectionPool";
+import { syncSubscriptionQuantity } from "./subscription";
 import { agencyIdFromRequest } from "../utils/agencyContext";
 
 /**
@@ -126,6 +127,13 @@ async function finalizeLogin(p: PendingLogin): Promise<string> {
   // la conexión VIEJA con la sesión antigua hasta el próximo despliegue, en
   // vez de la que se acaba de iniciar sesión ahora mismo.
   invalidateAccountClient(account.id);
+
+  // Suscripción: si esta cuenta es NUEVA de verdad (no un simple
+  // "Reconectar"), la agencia pasa a tener una modelo más - se ajusta la
+  // cantidad de la suscripción de Stripe si ya tiene un plan activo (ver
+  // syncSubscriptionQuantity en api/subscription.ts). Fire-and-forget: no
+  // debe retrasar ni poder romper el login, que ya ha tenido éxito.
+  syncSubscriptionQuantity(account.agencyId).catch(() => {});
 
   p.status = "success";
   p.accountId = account.id;
