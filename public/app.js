@@ -624,7 +624,7 @@ function toggleTheme() {
   const goDark = document.documentElement.getAttribute("data-theme") !== "dark";
   if (goDark) document.documentElement.setAttribute("data-theme", "dark");
   else document.documentElement.removeAttribute("data-theme");
-  try { localStorage.setItem("luxe_theme", goDark ? "dark" : "light"); } catch {}
+  try { localStorage.setItem("lureqo_theme", goDark ? "dark" : "light"); } catch {}
   if (navRerender) navRerender();
 }
 
@@ -13482,7 +13482,7 @@ function applyBranding() {
     brandText.innerHTML = "";
     if (isLegacy) {
       brandText.appendChild(el("div", { class: "brand-title" }, "LUREQO"));
-      brandText.appendChild(el("div", { class: "brand-title" }, "MANAGEMENT"));
+      brandText.appendChild(el("div", { class: "brand-title" }, "CRM"));
     } else {
       // Nombre de la agencia en 1-2 líneas (partido por palabras, como el
       // de LUXE) para que quepa igual en la barra lateral.

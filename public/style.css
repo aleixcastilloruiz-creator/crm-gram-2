@@ -1865,3 +1865,64 @@ body.detector-pagos-mode main#app { max-width: 1200px; }
 .chat-composer-editable:empty::before { content: attr(data-placeholder); color: rgba(255,255,255,0.4); pointer-events: none; }
 .chat-composer-editable .pe { display: inline-block; width: 22px; height: 22px; vertical-align: middle; margin: 0 1px; object-fit: contain; }
 .chat-composer-editable span.pe { width: auto; font-size: 18px; line-height: 22px; border-radius: 4px; background: rgba(255,255,255,0.08); }
+
+
+
+/* LUREQO CRM brand refresh: blue light mode */
+:root {
+  color-scheme: light;
+  --paper: #f3f7ff;
+  --paper-dim: #eaf1ff;
+  --paper-tint: #dce8ff;
+  --line: rgba(30, 75, 150, .14);
+  --green-950: #10264d;
+  --green-900: #ffffff;
+  --green-850: #f3f7ff;
+  --green-800: #e0eaff;
+  --green-700: #2563eb;
+  --gold-400: #1d4ed8;
+  --gold-500: #3b82f6;
+  --gold-600: #1e40af;
+  --cream: #14213d;
+  --cream-dim: #526581;
+  --cream-faint: #7b8ba5;
+  --red: #dc4141;
+  --green-ok: #15803d;
+  --amber: #b45309;
+}
+.sidebar { border-right-color: rgba(37,99,235,.16); box-shadow: 4px 0 24px rgba(31,74,145,.035); }
+.nav-item:hover, .account-item:hover { background: rgba(37,99,235,.07); }
+.nav-item.active, .account-item.active { background: rgba(37,99,235,.12); color: #1d4ed8; }
+.brand-initial { background: rgba(37,99,235,.1); border-color: rgba(37,99,235,.24); color:#1d4ed8; }
+button.primary, .btn-primary, .button-primary, .nav-item.active { --accent-blue: #2563eb; }
+
+
+/* LUREQO CRM brand refresh: true dark mode */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --paper: #080d18;
+  --paper-dim: #0d1424;
+  --paper-tint: #131e33;
+  --line: rgba(190, 210, 245, .12);
+  --green-950: #060a12;
+  --green-900: #0d1424;
+  --green-850: #121c30;
+  --green-800: #1b2941;
+  --green-700: #60a5fa;
+  --gold-400: #93c5fd;
+  --gold-500: #60a5fa;
+  --gold-600: #3b82f6;
+  --cream: #edf4ff;
+  --cream-dim: #b4c3da;
+  --cream-faint: #7e91b0;
+  --red: #fb7185;
+  --green-ok: #4ade80;
+  --amber: #fbbf24;
+}
+:root[data-theme="dark"] .sidebar { border-right-color: rgba(147,197,253,.12); }
+:root[data-theme="dark"] .nav-item:hover,
+:root[data-theme="dark"] .account-item:hover { background: rgba(96,165,250,.09); }
+:root[data-theme="dark"] .nav-item.active,
+:root[data-theme="dark"] .account-item.active { background: rgba(96,165,250,.16); color: #bfdbfe; }
+:root[data-theme="dark"] .brand-initial { background: rgba(96,165,250,.14); border-color: rgba(96,165,250,.25); color:#bfdbfe; }
+
