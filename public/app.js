@@ -2449,6 +2449,139 @@ function openScheduleStoryModal(account) {
   }, { wide: true });
 }
 
+
+// ---------- Copia de seguridad de la configuración del Reenviador ----------
+// Exporta orígenes, campañas, destinos y horarios de la cuenta seleccionada.
+// Nunca incluye sesiones/credenciales de Telegram ni activa campañas al importar.
+async function exportReenviadorConfig(accountId, accountLabel) {
+  try {
+    const [{ sourceGroups }, { campaigns }] = await Promise.all([
+      api(`/accounts/${accountId}/source-groups`),
+      api(`/accounts/${accountId}/campaigns`),
+    ]);
+    const fullCampaigns = await Promise.all(campaigns.map(async (campaign) => {
+      const { slots } = await api(`/campaigns/${campaign.id}/schedule-slots`);
+      return {
+        folderName: campaign.folderName,
+        sendMode: campaign.sendMode,
+        sendAlbums: campaign.sendAlbums,
+        textOnlyAllowed: campaign.textOnlyAllowed,
+        scheduleMode: campaign.scheduleMode,
+        cycleSeconds: campaign.cycleSeconds,
+        minGapSeconds: campaign.minGapSeconds,
+        maxGapSeconds: campaign.maxGapSeconds,
+        batchSize: campaign.batchSize,
+        batchRestMinSeconds: campaign.batchRestMinSeconds,
+        batchRestMaxSeconds: campaign.batchRestMaxSeconds,
+        activeFrom: campaign.activeFrom,
+        activeTo: campaign.activeTo,
+        minForeignMessagesBeforeRepeat: campaign.minForeignMessagesBeforeRepeat,
+        sourceGroupTitle: sourceGroups.find(g => g.id === campaign.sourceGroupId)?.title,
+        destinations: (campaign.destinationChats || []).map(d => ({
+          chatId: d.chatId, chatTitle: d.chatTitle, topicId: d.topicId, excluded: d.excluded,
+        })),
+        scheduleSlots: slots.map(slot => ({
+          timeOfDay: slot.timeOfDay, position: slot.position, active: slot.active,
+        })),
+      };
+    }));
+    const backup = {
+      format: "lureqo-reenviador-config",
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      accountLabel,
+      sourceGroups: sourceGroups.map(g => ({
+        title: g.title, chatId: g.chatId, topicId: g.topicId,
+        topicName: g.topicName, recentLimit: g.recentLimit,
+      })),
+      campaigns: fullCampaigns,
+    };
+    const blob = new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `lureqo-reenviador-${String(accountLabel || "configuracion").replace(/[^a-z0-9_-]/gi, "_")}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+    toast("Configuración exportada correctamente");
+  } catch (err) {
+    toast("No se pudo exportar: " + err.message, true);
+  }
+}
+
+async function importReenviadorConfig(accountId, file) {
+  try {
+    const backup = JSON.parse(await file.text());
+    if (backup.format !== "lureqo-reenviador-config" || backup.version !== 1 ||
+        !Array.isArray(backup.sourceGroups) || !Array.isArray(backup.campaigns)) {
+      throw new Error("El archivo no es una copia válida del Reenviador de LUREQO.");
+    }
+    const ok = await confirmModal({
+      title: "¿Importar configuración?",
+      body: `Se añadirán ${backup.sourceGroups.length} orígenes y ${backup.campaigns.length} campañas a esta cuenta. Las campañas se crearán PAUSADAS para evitar envíos automáticos. No se borrará la configuración existente.`,
+      confirmLabel: "Importar configuración",
+    });
+    if (!ok) return;
+
+    const sourceMap = new Map();
+    for (const group of backup.sourceGroups) {
+      const { sourceGroup } = await api(`/accounts/${accountId}/source-groups`, {
+        method: "POST",
+        body: JSON.stringify(group),
+      });
+      sourceMap.set(group.title, sourceGroup.id);
+    }
+    let imported = 0;
+    const warnings = [];
+    for (const c of backup.campaigns) {
+      const sourceGroupId = sourceMap.get(c.sourceGroupTitle);
+      if (!sourceGroupId) { warnings.push(`No se encontró el origen de "${c.folderName}"`); continue; }
+      const payload = {
+        sourceGroupId, folderName: c.folderName,
+        sendMode: c.sendMode, scheduleMode: c.scheduleMode,
+        cycleSeconds: c.cycleSeconds, minGapSeconds: c.minGapSeconds,
+        maxGapSeconds: c.maxGapSeconds, batchSize: c.batchSize,
+        batchRestMinSeconds: c.batchRestMinSeconds, batchRestMaxSeconds: c.batchRestMaxSeconds,
+        activeFrom: c.activeFrom, activeTo: c.activeTo,
+      };
+      const { campaign } = await api(`/accounts/${accountId}/campaigns`, {
+        method: "POST", body: JSON.stringify(payload),
+      });
+      // Campos que no forman parte del alta inicial se aplican después.
+      await api(`/campaigns/${campaign.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          sendAlbums: !!c.sendAlbums,
+          textOnlyAllowed: !!c.textOnlyAllowed,
+          minForeignMessagesBeforeRepeat: c.minForeignMessagesBeforeRepeat,
+        }),
+      });
+      for (const d of (c.destinations || [])) {
+        const { destination } = await api(`/campaigns/${campaign.id}/destinations`, {
+          method: "POST",
+          body: JSON.stringify({ chatId: d.chatId, chatTitle: d.chatTitle, topicId: d.topicId }),
+        });
+        if (d.excluded) await api(`/destinations/${destination.id}`, {
+          method: "PATCH", body: JSON.stringify({ excluded: true }),
+        });
+      }
+      for (const slot of (c.scheduleSlots || [])) {
+        try {
+          await api(`/campaigns/${campaign.id}/schedule-slots`, {
+            method: "POST", body: JSON.stringify(slot),
+          });
+        } catch (err) { warnings.push(`${c.folderName}: horario ${slot.timeOfDay} no importado (${err.message})`); }
+      }
+      imported++;
+    }
+    toast(`Importación completada: ${imported} campañas añadidas en pausa${warnings.length ? `. ${warnings.length} aviso(s); consulta la consola.` : ""}`);
+    if (warnings.length) console.warn("Avisos de importación:", warnings);
+    renderAccountView(accountId);
+  } catch (err) {
+    toast("No se pudo importar: " + err.message, true);
+  }
+}
+
 // ---------- vista principal de una cuenta ----------
 
 async function renderAccountView(accountId) {
@@ -2472,7 +2605,20 @@ async function renderAccountView(accountId) {
   // Campañas
   appEl.appendChild(el("div", { class: "section-title-row" }, [
     el("h2", {}, "Campañas (carpetas de Telegram)"),
-    el("div", { style: "display:flex;gap:8px" }, [
+    el("div", { style: "display:flex;gap:8px;flex-wrap:wrap" }, [
+      el("button", { class: "secondary", onclick: () => exportReenviadorConfig(accountId, account.label) }, "⬇ Exportar configuración"),
+      (() => {
+        const importInput = el("input", { type: "file", accept: "application/json,.json", style: "display:none" });
+        importInput.addEventListener("change", async () => {
+          const file = importInput.files && importInput.files[0];
+          if (file) await importReenviadorConfig(accountId, file);
+          importInput.value = "";
+        });
+        return el("span", { style: "display:inline-flex" }, [
+          el("button", { class: "secondary", onclick: () => importInput.click() }, "⬆ Importar configuración"),
+          importInput,
+        ]);
+      })(),
       el("button", {
         class: "ghost",
         disabled: campaigns.length === 0 ? "true" : null,
