@@ -645,6 +645,7 @@ function goToView(view) {
   if (view !== "mensajes") closeMensajesLiveConnection();
   if (view !== "whatsapp" && typeof stopWaStatusPoll === "function") stopWaStatusPoll();
   state.currentView = view;
+  document.body.dataset.crmView = view;
   renderSidenav();
   // El Detector de pagos usa el ancho completo (sin la columna de cuentas),
   // como Mensajes Pro: hay que quitar esa clase al salir a cualquier otra
