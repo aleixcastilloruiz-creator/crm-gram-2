@@ -1927,98 +1927,27 @@ button.primary, .btn-primary, .button-primary, .nav-item.active { --accent-blue:
 :root[data-theme="dark"] .brand-initial { background: rgba(96,165,250,.14); border-color: rgba(96,165,250,.25); color:#bfdbfe; }
 
 
-
-/* ==========================================================
-   LUREQO CRM — NOVA DESIGN SYSTEM (full visual overhaul)
-   ========================================================== */
-:root {
-  --paper:#080c16; --paper-dim:#0d1321; --paper-tint:#141d30;
-  --line:rgba(166,184,224,.13);
-  --green-950:#070b14; --green-900:#0b1120; --green-850:#111a2b;
-  --green-800:#18243a; --green-700:#7667f5;
-  --gold-400:#b8a9ff; --gold-500:#9b8cff; --gold-600:#7565ed;
-  --cream:#e9eefb; --cream-dim:#9ba8c4; --cream-faint:#6d7a98;
-  --red:#ff6b83; --green-ok:#38d9a3; --amber:#ffbd69;
-  --radius:16px; --sidebar-w:252px; --sidebar-w-collapsed:72px;
-  --accountlist-w:248px; --dialogspane-w:320px; --notespane-w:320px;
-}
-html,body { background:#080c16!important; color:var(--cream); }
-body { font-family:Inter, ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif; letter-spacing:-.012em; }
-.shell { min-height:100vh; background:
- radial-gradient(ellipse at 15% -10%,rgba(111,91,255,.14),transparent 36%),
- radial-gradient(ellipse at 100% 10%,rgba(39,176,210,.08),transparent 28%),#080c16; }
-.sidebar { background:rgba(10,15,27,.92)!important; border-right:1px solid rgba(164,180,220,.12)!important; padding:22px 14px!important; box-shadow:12px 0 40px rgba(0,0,0,.12); backdrop-filter:blur(18px); }
-.brand { padding:10px 12px 24px!important; gap:12px!important; }
-.brand img { width:38px!important;height:38px!important;border-radius:12px!important;box-shadow:0 0 28px rgba(126,108,255,.28); }
-.brand-title { font-size:12px!important; letter-spacing:.19em!important; font-weight:800!important; line-height:1.35!important; }
-#sidenav { gap:5px!important; }
-.nav-item { min-height:43px!important; border-radius:11px!important; padding:0 13px!important; color:#8997b4!important; font-weight:600!important; transition:background .18s,color .18s,transform .18s!important; }
-.nav-item .nav-icon { width:21px!important; opacity:.9; }
-.nav-item:hover { background:rgba(126,108,255,.09)!important;color:#e4e7ff!important;transform:translateX(2px); }
-.nav-item.active,.nav-item[aria-current="page"] { background:linear-gradient(100deg,rgba(117,101,237,.23),rgba(117,101,237,.08))!important;color:#c5bdff!important; box-shadow:inset 3px 0 #9284ff,0 5px 18px rgba(0,0,0,.12); }
-.nav-soon { opacity:.45; }
-.workspace { background:transparent!important; min-width:0; }
-.reenviador-layout { gap:0!important; }
-.account-list { background:rgba(11,17,31,.74)!important; border-right:1px solid var(--line)!important; padding:20px 13px!important; }
-.account-list-title { color:#7f8eac!important;text-transform:uppercase;letter-spacing:.13em;font-size:10px!important;font-weight:800!important;padding:7px 10px 14px!important; }
-.account-item { border:1px solid transparent!important;border-radius:13px!important;padding:11px!important;margin-bottom:5px!important;background:transparent!important;transition:.18s!important; }
-.account-item:hover { background:rgba(255,255,255,.035)!important;border-color:var(--line)!important; }
-.account-item.active { background:linear-gradient(110deg,rgba(117,101,237,.16),rgba(117,101,237,.04))!important;border-color:rgba(143,130,255,.22)!important; }
-.account-avatar { border-radius:12px!important;background:linear-gradient(135deg,#6d5df0,#21a9c7)!important;box-shadow:0 5px 15px rgba(92,81,220,.2); }
-.account-name { color:#e4eaf8!important;font-weight:650!important; }
-#app { padding:30px clamp(20px,3vw,48px)!important; min-width:0; }
-#app h1,#app h2 { color:#edf2ff!important;letter-spacing:-.04em!important;font-weight:760!important; }
-#app h1 { font-size:clamp(25px,2vw,34px)!important;line-height:1.15!important;margin-bottom:8px!important; }
-#app h2 { font-size:21px!important; }
-.subtitle { color:#8391ad!important;font-size:13px!important; }
-.card { background:linear-gradient(145deg,rgba(19,28,47,.94),rgba(13,20,35,.96))!important;border:1px solid rgba(160,178,220,.13)!important;border-radius:17px!important;padding:22px!important;box-shadow:0 12px 32px rgba(0,0,0,.12)!important; }
-.card:hover { border-color:rgba(150,138,255,.2)!important; }
-.card-title { color:#e4eaff!important;font-weight:750!important;letter-spacing:-.025em; }
-.banner { border-radius:14px!important;border:1px solid rgba(143,130,255,.2)!important;background:linear-gradient(110deg,rgba(117,101,237,.13),rgba(29,170,197,.06))!important;color:#c7d0ed!important; }
-.form-row input,.field input,.field select,.field textarea,.filters input,.filters select,.dashboard-filter-bar input,.dashboard-filter-bar select,
-input:not([type=checkbox]):not([type=radio]):not([type=range]),select,textarea {
- background:#0a1120!important;border:1px solid #26334d!important;border-radius:10px!important;color:#e7edff!important;min-height:39px;outline:none!important;box-shadow:none!important;transition:border-color .15s,box-shadow .15s!important;
-}
-input:focus,select:focus,textarea:focus { border-color:#8879ff!important;box-shadow:0 0 0 3px rgba(136,121,255,.13)!important; }
-input::placeholder,textarea::placeholder { color:#63718e!important; }
-button,.btn { border-radius:10px!important;font-weight:650!important;transition:transform .15s,filter .15s,box-shadow .15s!important; }
-button:hover,.btn:hover { filter:brightness(1.08);transform:translateY(-1px); }
-button.primary,.btn-primary,.button-primary { background:linear-gradient(135deg,#8172ff,#6254df)!important;border:1px solid #9185ff!important;color:white!important;box-shadow:0 7px 18px rgba(100,83,220,.22)!important; }
-.pill { border-radius:999px!important;padding:5px 10px!important;font-weight:650!important; }
-.tabs { border-bottom:1px solid var(--line)!important;gap:7px!important; }
-.tab { border-radius:10px 10px 0 0!important;color:#8795b2!important;padding:11px 15px!important; }
-.tab.active { color:#c6bdff!important;background:rgba(117,101,237,.1)!important;border-bottom:2px solid #9284ff!important; }
-table { border-collapse:separate!important;border-spacing:0!important;overflow:hidden;border:1px solid var(--line)!important;border-radius:13px!important; }
-th { background:#111a2b!important;color:#8796b5!important;font-size:10px!important;text-transform:uppercase!important;letter-spacing:.09em!important;font-weight:800!important; }
-td { border-top:1px solid rgba(160,178,220,.08)!important;color:#cbd5ea!important; }
-tr:hover td { background:rgba(125,111,255,.035)!important; }
-.modal { background:#111a2b!important;border:1px solid #2a3752!important;border-radius:20px!important;box-shadow:0 30px 100px rgba(0,0,0,.55)!important; }
-.modal-backdrop { backdrop-filter:blur(7px)!important;background:rgba(2,5,12,.72)!important; }
-.toast { background:#18243a!important;border:1px solid #344361!important;border-radius:12px!important;box-shadow:0 12px 36px #0005!important; }
-.kpi-tile { background:linear-gradient(145deg,#151e32,#0f1728)!important;border:1px solid var(--line)!important;border-radius:16px!important;padding:19px!important; }
-.kpi-label { color:#8c9ab7!important;font-size:11px!important;text-transform:uppercase;letter-spacing:.08em;font-weight:750!important; }
-.kpi-value { color:#f1f4ff!important;font-size:29px!important;font-weight:800!important;letter-spacing:-.04em; }
-.kpi-compare { color:#7e8eac!important; }
-.day-chart-bar { background:linear-gradient(180deg,#9b8cff,#5d50d2)!important;border-radius:7px 7px 2px 2px!important; }
-.ranking-bar-track { background:#202b42!important;border-radius:999px!important;overflow:hidden; }
-.ranking-bar-fill { background:linear-gradient(90deg,#7d6cff,#39b6d1)!important;border-radius:999px!important; }
-.status-grid { background:#0b1220!important;border:1px solid var(--line)!important;border-radius:13px!important;padding:14px!important; }
-.status-grid .label { color:#8190ad!important; }
-.status-grid .value { color:#e5ebfb!important;font-weight:700!important; }
-.accordion-row { border-bottom:1px solid var(--line)!important;padding:15px!important; }
-.accordion-row:hover { background:rgba(125,111,255,.05)!important; }
-.empty { border:1px dashed #33415d!important;border-radius:14px!important;color:#8290ac!important;background:rgba(12,19,33,.5)!important;padding:30px!important; }
-.section-title-row { margin-bottom:20px!important; }
-.section-title-row h2 { margin:0!important; }
-.mobile-topbar { background:#0b1120!important;border-bottom:1px solid var(--line)!important; }
-.mobile-nav-backdrop { background:#02050cbb!important;backdrop-filter:blur(5px); }
-@media(max-width:900px) {
- #app { padding:22px 16px!important; }
- .sidebar { padding:16px 10px!important; }
- .account-list { padding:14px 9px!important; }
- .card { padding:17px!important; }
-}
-@media(prefers-reduced-motion:no-preference) {
- .card,.kpi-tile,.account-item { animation:novaRise .28s ease both; }
- @keyframes novaRise { from {opacity:.65;transform:translateY(5px)} to {opacity:1;transform:translateY(0)} }
-}
+/* ===== LUREQO CRM / NOVA UI — refinamiento integral de módulos ===== */
+:root{--nova-accent:#6d7cff;--nova-accent-2:#8b5cf6;--nova-glow:rgba(109,124,255,.16);--nova-radius:14px;--nova-shadow:0 12px 36px rgba(2,6,23,.16)}
+:root[data-theme="dark"]{--paper:#080b14;--paper-dim:#0c1220;--paper-tint:#111a2b;--line:rgba(148,163,184,.13);--cream:#edf2ff;--cream-dim:#a9b6ce;--cream-faint:#71819e;--green-700:#818cf8;--gold-400:#a5b4fc;--gold-500:#818cf8;--gold-600:#6366f1}
+html{scroll-behavior:smooth}body{letter-spacing:.005em;-webkit-font-smoothing:antialiased}
+.shell{background:var(--paper)}
+.sidebar{background:linear-gradient(180deg,var(--paper-dim),var(--paper));border-right:1px solid var(--line);padding:20px 13px;gap:22px;box-shadow:8px 0 30px rgba(0,0,0,.025)}
+.brand{padding:8px 10px 18px!important;gap:12px!important}.brand img{width:38px;height:38px;border-radius:12px;box-shadow:0 5px 20px var(--nova-glow)}.brand-title:first-child{font-size:15px!important;font-weight:800!important;letter-spacing:.12em}.brand-title:last-child{font-size:10px!important;letter-spacing:.24em;opacity:.58}
+#sidenav{gap:5px!important}.nav-item{border-radius:10px!important;min-height:39px;transition:background .18s ease,color .18s ease,transform .18s ease!important}.nav-item:hover{transform:translateX(2px)}.nav-item.active{box-shadow:inset 3px 0 var(--nova-accent),0 4px 14px var(--nova-glow);font-weight:650}.nav-icon{width:25px!important;font-size:15px!important;filter:saturate(.8)}
+.workspace{background:radial-gradient(ellipse at 80% 0%,rgba(99,102,241,.035),transparent 45%),var(--paper)}
+#app{padding:clamp(20px,3vw,38px)!important;max-width:1800px;margin:0 auto;width:100%;box-sizing:border-box}
+#app h1{font-size:clamp(23px,2vw,30px)!important;letter-spacing:-.035em;font-weight:760!important;line-height:1.2;margin-bottom:9px!important}#app h2{font-size:18px!important;letter-spacing:-.02em;font-weight:700!important}#app h3{font-size:14px!important;font-weight:700!important}
+.subtitle,.hint,.empty{line-height:1.6!important}.subtitle{font-size:13px!important;color:var(--cream-dim)!important;margin-bottom:24px!important}
+.card,.config-card,.stat-card,.panel,.section-card{border:1px solid var(--line)!important;border-radius:var(--nova-radius)!important;background:var(--paper-dim)!important;box-shadow:0 2px 8px rgba(0,0,0,.025);transition:border-color .2s,box-shadow .2s}.card:hover,.config-card:hover{border-color:rgba(129,140,248,.25)!important}.card{padding:20px!important}
+button,.btn,input,select,textarea{font:inherit}button,.btn{border-radius:9px!important;font-weight:600!important;transition:transform .15s,box-shadow .15s,background .15s!important}button:active,.btn:active{transform:translateY(1px)}button.primary,.btn.primary{box-shadow:0 5px 16px var(--nova-glow)}
+input,select,textarea{border-radius:9px!important;border-color:var(--line)!important;min-height:38px}input:focus,select:focus,textarea:focus{outline:none!important;border-color:var(--nova-accent)!important;box-shadow:0 0 0 3px var(--nova-glow)!important}
+.table-wrap,table{border-radius:12px;overflow:hidden}th{font-size:10px!important;text-transform:uppercase;letter-spacing:.09em;font-weight:750!important}td,th{padding:12px 14px!important}tbody tr{transition:background .15s}tbody tr:hover{background:var(--nova-glow)!important}
+.chip,.badge,.pill,.status-pill{border-radius:999px!important;font-weight:650!important;letter-spacing:.01em}
+.modal-overlay,.modal-backdrop{backdrop-filter:blur(8px)!important}.modal{border:1px solid var(--line)!important;border-radius:18px!important;box-shadow:0 30px 100px rgba(0,0,0,.35)!important}
+.account-list{background:var(--paper-dim)!important;border-right:1px solid var(--line)!important;padding:14px!important}.account-list-title{font-size:10px!important;text-transform:uppercase;letter-spacing:.12em;font-weight:800!important}.account-item{border-radius:10px!important;padding:10px!important;margin:3px 0}.account-item.active{box-shadow:inset 3px 0 var(--nova-accent)!important}
+/* Módulos de mensajería: estructura de inbox moderna */.chat-pane,.chat-pane-body,.chat-messages{background:var(--paper)!important}.chat-header{border-bottom:1px solid var(--line)!important;padding:14px 18px!important}.chat-bubble{border-radius:14px!important;box-shadow:0 2px 6px rgba(0,0,0,.04)}.chat-composer{border:1px solid var(--line)!important;border-radius:14px!important;margin:12px!important;background:var(--paper-dim)!important}
+/* Configuración y paneles: navegación secundaria y grupos */.config-nav-item{border-radius:9px!important;padding:10px 13px!important;transition:all .15s}.config-nav-item:hover{background:var(--nova-glow)!important}.config-group-title{font-size:10px!important;letter-spacing:.12em;text-transform:uppercase;font-weight:800!important}
+/* Ayuda, informes, pagos y vistas administrativas */.ayuda-view,.ayuda-columns{gap:18px!important}.ayuda-col-main,.ayuda-col-side{border-radius:var(--nova-radius)!important}.console-summary,.accordion-row{border-radius:10px!important}.accordion-row:hover{background:var(--nova-glow)!important}
+/* Responsive polish */@media(max-width:900px){#app{padding:18px 14px!important}.sidebar{box-shadow:18px 0 50px rgba(0,0,0,.2)}.card{padding:15px!important}.account-list{padding:9px!important}}
+@media(prefers-reduced-motion:reduce){*,*:before,*:after{animation-duration:.01ms!important;transition-duration:.01ms!important;scroll-behavior:auto!important}}
